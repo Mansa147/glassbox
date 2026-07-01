@@ -179,19 +179,14 @@ func (s *Store) columnExists(table, column string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to inspect %s schema: %w", table, err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var defaultValue interface{}
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return false, fmt.Errorf("failed to scan %s schema: %w", table, err)
-		}
-		if name == column {
-			return true, nil
-		}
+	if err := s.ensureColumn("sessions", "audit_hash", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "audit_signature", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "previous_session_hash", "TEXT"); err != nil {
+		return err
 	}
 	if err := rows.Err(); err != nil {
 		return false, err
