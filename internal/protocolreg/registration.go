@@ -122,6 +122,17 @@ func NewRegistrar() (*Registrar, error) {
 		)
 	}
 
+	// Validate that the path is not a system-critical directory (e.g., root, /usr, /etc)
+	// which would indicate a misconfigured installation.
+	cleanPath := filepath.Clean(executablePath)
+	if cleanPath == "/" || cleanPath == "\\" {
+		return nil, fmt.Errorf(
+			"executable path %q resolves to a system root directory — this is not a valid binary location\n"+
+				"  Fix: ensure glassbox is installed in a proper bin directory (e.g., ~/.local/bin or /usr/local/bin)",
+			executablePath,
+		)
+	}
+
 	if _, err := os.Stat(executablePath); err != nil {
 		return nil, fmt.Errorf(
 			"executable not found at %s: %w\n"+
