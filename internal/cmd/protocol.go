@@ -139,6 +139,7 @@ To fix a broken registration automatically, use 'glassbox protocol:repair'.`,
 		}
 
 		diag := registrar.Diagnose()
+		fmt.Fprintf(cmd.OutOrStdout(), "Summary: %s\n", diag.Summary())
 		for _, check := range diag.Checks {
 			fmt.Fprintf(cmd.OutOrStdout(), "[OK] %s\n", check)
 		}
@@ -209,6 +210,7 @@ On failure, remediation steps are printed to help repair the registration.`,
 
 		if err != nil || !probePassed {
 			diag := registrar.Diagnose()
+			fmt.Fprintf(cmd.ErrOrStderr(), "\nSummary: %s\n", diag.Summary())
 			if len(diag.RemediationSteps) > 0 {
 				fmt.Fprintf(cmd.ErrOrStderr(), "\nRemediation steps:\n")
 				for i, step := range diag.RemediationSteps {
@@ -225,6 +227,7 @@ On failure, remediation steps are printed to help repair the registration.`,
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Verified GLASSBOX Protocol registration on %s (%dms)\n", report.Platform, report.ElapsedMs)
+		fmt.Fprintf(cmd.OutOrStdout(), "Summary: %s\n", report.Summary())
 		return nil
 	},
 }
@@ -372,7 +375,8 @@ Exit codes:
 			fmt.Fprintf(cmd.ErrOrStderr(), "[FAIL] %s\n", issue)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "\nStatus: %s  (platform: %s, scheme: %s://)\n",
+		fmt.Fprintf(cmd.OutOrStdout(), "\nSummary: %s\n", report.Summary())
+		fmt.Fprintf(cmd.OutOrStdout(), "Status: %s  (platform: %s, scheme: %s://)\n",
 			report.Status, report.Platform, report.Scheme)
 
 		if report.RegisteredHandler != "" {

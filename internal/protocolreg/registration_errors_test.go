@@ -198,8 +198,6 @@ func TestShellQuote_EmptyString(t *testing.T) {
 	}
 }
 
-// ── XdgMime missing error message ────────────────────────────────────────────
-
 func TestRegisterLinux_XdgMissingMessage_IsActionable(t *testing.T) {
 	// Construct the exact error message that registerLinux would return when
 	// xdg-mime is absent, and verify it contains installation guidance.

@@ -316,6 +316,43 @@ func (r *Registrar) Verify() (*VerificationReport, error) {
 	return report, nil
 }
 
+// validateRegistrationPreconditions rejects invalid inputs before any OS
+// registration artefacts are written.
+func (r *Registrar) validateRegistrationPreconditions() error {
+	if r.executablePath == "" {
+		return fmt.Errorf(
+			"cannot register: executable path is empty\n" +
+				"  Fix: ensure glassbox is invoked from a valid binary path, not via 'go run'",
+		)
+	}
+
+	if strings.ContainsRune(r.executablePath, 0) {
+		return fmt.Errorf(
+			"cannot register: executable path contains a null byte\n" +
+				"  Fix: reinstall Glassbox from a trusted source",
+		)
+	}
+
+	if _, err := os.Stat(r.executablePath); err != nil {
+		return fmt.Errorf(
+			"cannot register: executable not found at %s: %w\n"+
+				"  Fix: reinstall Glassbox or verify the binary path is correct",
+			r.executablePath, err,
+		)
+	}
+
+	switch runtime.GOOS {
+	case "windows", "darwin", "linux":
+		return nil
+	default:
+		return fmt.Errorf(
+			"protocol registration is not supported on %s\n"+
+				"  Fix: use Linux, macOS, or Windows to register the %s:// handler",
+			runtime.GOOS, Scheme,
+		)
+	}
+}
+
 func (r *Registrar) registerWindows() error {
 	// Detect Protocol Registry Conflicts (Issue #1198)
 	registryOutput, err := runCommand("reg", "query", windowsRegistryKey, "/ve")

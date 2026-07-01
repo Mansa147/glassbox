@@ -587,6 +587,12 @@ The `--format` flag accepts only `text` (default) or `json`. Any other value is 
 invalid --format "xml": must be 'text' or 'json'
 ```
 
+### Registration summaries
+
+`protocol:diagnose`, `protocol:status`, and `protocol:verify` now print a one-line **Summary** before detailed checks. The summary reflects the overall registration state (`ok`, `degraded`, `not_registered`, or `error`) and the number of detected issues.
+
+`protocol:register` validates the current binary path and platform support **before** writing any OS registration artefacts. Invalid inputs fail immediately with actionable remediation text instead of low-level OS errors.
+
 ---
 
 ## Session Recovery and Integrity

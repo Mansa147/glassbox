@@ -13,10 +13,49 @@ const execAsync = promisify(exec);
 const SUPPORTED_PLATFORMS = new Set(['win32', 'darwin', 'linux']);
 
 export interface ProtocolDiagnostics {
+    platform: string;
+    scheme: string;
+    status: ProtocolRegistrationStatus;
     registered: boolean;
     cliPath: string | null;
+    currentCliPath: string;
     pathExists: boolean;
     isExecutable: boolean;
+    issues: string[];
+    remediationSteps: string[];
+}
+
+/**
+ * Raised when registration preconditions fail before OS artefacts are written.
+ */
+export class RegistrationValidationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'RegistrationValidationError';
+    }
+}
+
+/**
+ * Returns a concise human-readable summary for reporting and status output.
+ */
+export function formatRegistrationSummary(diag: ProtocolDiagnostics): string {
+    const issueCount = diag.issues.length;
+
+    switch (diag.status) {
+        case 'ok':
+            return `Protocol handler ${diag.scheme}:// is registered and healthy on ${diag.platform}.`;
+        case 'not_registered':
+            if (issueCount === 0) {
+                return `Protocol handler ${diag.scheme}:// is not registered on ${diag.platform}.`;
+            }
+            return `Protocol handler ${diag.scheme}:// is not registered on ${diag.platform} (${issueCount} issue(s)).`;
+        case 'degraded':
+            return `Protocol handler ${diag.scheme}:// is registered but degraded on ${diag.platform} (${issueCount} issue(s)).`;
+        case 'unsupported':
+            return `Protocol registration is not supported on ${diag.platform}.`;
+        default:
+            return `Protocol handler ${diag.scheme}:// status is ${diag.status} on ${diag.platform}.`;
+    }
 }
 
 /**
@@ -285,6 +324,10 @@ Terminal=false`;
     async isRegistered(): Promise<boolean> {
         const platform = os.platform();
 
+        if (!SUPPORTED_PLATFORMS.includes(platform as typeof SUPPORTED_PLATFORMS[number])) {
+            return false;
+        }
+
         try {
             switch (platform) {
                 case 'win32': {
@@ -368,39 +411,82 @@ Terminal=false`;
     }
 
     async diagnose(): Promise<ProtocolDiagnostics> {
+        const platform = os.platform();
+        const base: ProtocolDiagnostics = {
+            platform,
+            scheme: this.protocol,
+            status: 'not_registered',
+            registered: false,
+            cliPath: null,
+            currentCliPath: this.cliPath,
+            pathExists: false,
+            isExecutable: false,
+            issues: [],
+            remediationSteps: [],
+        };
+
+        if (!SUPPORTED_PLATFORMS.includes(platform as typeof SUPPORTED_PLATFORMS[number])) {
+            base.status = 'unsupported';
+            base.issues.push(`Protocol registration is not supported on ${platform}`);
+            base.remediationSteps.push('Use Linux, macOS, or Windows to register the glassbox:// handler');
+            return base;
+        }
+
         const registered = await this.isRegistered();
         if (!registered) {
-            return { registered: false, cliPath: null, pathExists: false, isExecutable: false };
+            base.issues.push('Protocol handler is not registered with the operating system');
+            base.remediationSteps.push('Run "GLASSBOX Protocol:register" to enable dashboard integration');
+            return base;
         }
 
+        base.registered = true;
         const cliPath = await this.getRegisteredPath();
-        if (!cliPath) {
-            return { registered: true, cliPath: null, pathExists: false, isExecutable: false };
-        }
+        base.cliPath = cliPath;
 
-        let pathExists = false;
-        let isExecutable = false;
+        if (!cliPath) {
+            base.status = 'degraded';
+            base.issues.push('Could not determine registered CLI path from OS artefacts');
+            base.remediationSteps.push('Re-run "GLASSBOX Protocol:register" to refresh registration');
+            return base;
+        }
 
         try {
             await fs.access(cliPath);
-            pathExists = true;
+            base.pathExists = true;
         } catch {
-            return { registered: true, cliPath, pathExists: false, isExecutable: false };
+            base.status = 'degraded';
+            base.issues.push(`Binary not found at ${cliPath}`);
+            base.remediationSteps.push(`Ensure the Glassbox binary exists at ${cliPath}`);
+            base.remediationSteps.push('Re-run "GLASSBOX Protocol:register" to update the registered path');
+            return base;
         }
 
         try {
-            if (os.platform() === 'win32') {
+            if (platform === 'win32') {
                 const ext = path.extname(cliPath).toLowerCase();
-                isExecutable = ['.exe', '.cmd', '.bat', '.com'].includes(ext);
+                base.isExecutable = ['.exe', '.cmd', '.bat', '.com'].includes(ext);
             } else {
                 await fs.access(cliPath, fsConstants.X_OK);
-                isExecutable = true;
+                base.isExecutable = true;
             }
         } catch {
-            // File exists but is not executable
+            base.isExecutable = false;
         }
 
-        return { registered: true, cliPath, pathExists, isExecutable };
+        if (!base.isExecutable) {
+            base.status = 'degraded';
+            base.issues.push(`Binary at ${cliPath} is not executable`);
+            if (platform === 'win32') {
+                base.remediationSteps.push('Ensure the registered file is a runnable .exe, .cmd, .bat, or .com binary');
+            } else {
+                base.remediationSteps.push(`Restore execute permissions, for example: chmod +x ${cliPath}`);
+            }
+            base.remediationSteps.push('Re-run "GLASSBOX Protocol:register" if the binary moved or was replaced');
+            return base;
+        }
+
+        base.status = 'ok';
+        return base;
     }
 
     private async ensureLinuxDependencies(): Promise<void> {

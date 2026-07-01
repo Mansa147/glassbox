@@ -216,3 +216,28 @@ func TestProtocolRegisterCmd_FailureError_MentionsRepairTip(t *testing.T) {
 		t.Errorf("register failure should mention protocol:repair; got: %s", wrapped)
 	}
 }
+
+// ── DiagnosticReport.Summary rendering ───────────────────────────────────────
+
+func TestProtocolDiagnoseCmd_SummaryLine_IncludesStatus(t *testing.T) {
+	report := &protocolreg.DiagnosticReport{
+		Platform: "linux",
+		Scheme:   protocolreg.Scheme,
+		Status:   protocolreg.StatusDegraded,
+		Issues:   []string{"wrapper script does not reference current binary"},
+	}
+
+	var stdout strings.Builder
+	stdout.WriteString("Summary: " + report.Summary() + "\n")
+
+	out := stdout.String()
+	if !strings.Contains(out, "Summary:") {
+		t.Errorf("diagnose output should include Summary line, got: %s", out)
+	}
+	if !strings.Contains(out, "degraded") {
+		t.Errorf("summary should mention degraded status, got: %s", out)
+	}
+	if !strings.Contains(out, protocolreg.Scheme+"://") {
+		t.Errorf("summary should include scheme, got: %s", out)
+	}
+}

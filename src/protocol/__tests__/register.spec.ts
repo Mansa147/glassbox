@@ -150,15 +150,27 @@ describe('ProtocolRegistrar.diagnose', () => {
         registrar = new ProtocolRegistrar();
     });
 
+    it('should report unsupported platforms with remediation steps', async () => {
+        (os.platform as jest.Mock).mockReturnValue('freebsd');
+
+        const result = await registrar.diagnose();
+
+        expect(result.status).toBe('unsupported');
+        expect(result.issues.length).toBeGreaterThan(0);
+        expect(result.remediationSteps.length).toBeGreaterThan(0);
+        expect(formatRegistrationSummary(result)).toContain('not supported');
+    });
+
     it('should report not registered when protocol is unregistered', async () => {
         jest.spyOn(registrar, 'isRegistered').mockResolvedValue(false);
 
         const result = await registrar.diagnose();
 
         expect(result.registered).toBe(false);
+        expect(result.status).toBe('not_registered');
         expect(result.cliPath).toBeNull();
-        expect(result.pathExists).toBe(false);
-        expect(result.isExecutable).toBe(false);
+        expect(result.issues).toContain('Protocol handler is not registered with the operating system');
+        expect(result.remediationSteps.length).toBeGreaterThan(0);
     });
 
     it('should report unknown path when registered path cannot be resolved', async () => {
@@ -168,8 +180,9 @@ describe('ProtocolRegistrar.diagnose', () => {
         const result = await registrar.diagnose();
 
         expect(result.registered).toBe(true);
+        expect(result.status).toBe('degraded');
         expect(result.cliPath).toBeNull();
-        expect(result.pathExists).toBe(false);
+        expect(result.issues.length).toBeGreaterThan(0);
     });
 
     it('should detect missing binary', async () => {
@@ -180,9 +193,10 @@ describe('ProtocolRegistrar.diagnose', () => {
         const result = await registrar.diagnose();
 
         expect(result.registered).toBe(true);
+        expect(result.status).toBe('degraded');
         expect(result.cliPath).toBe('/usr/local/bin/Glassbox');
         expect(result.pathExists).toBe(false);
-        expect(result.isExecutable).toBe(false);
+        expect(result.issues.some((issue) => issue.includes('Binary not found'))).toBe(true);
     });
 
     it('should detect non-executable binary on Unix', async () => {
@@ -196,8 +210,10 @@ describe('ProtocolRegistrar.diagnose', () => {
         const result = await registrar.diagnose();
 
         expect(result.registered).toBe(true);
+        expect(result.status).toBe('degraded');
         expect(result.pathExists).toBe(true);
         expect(result.isExecutable).toBe(false);
+        expect(result.remediationSteps.some((step) => step.includes('chmod +x'))).toBe(true);
     });
 
     it('should check file extension for executability on Windows', async () => {
@@ -208,6 +224,7 @@ describe('ProtocolRegistrar.diagnose', () => {
 
         const result = await registrar.diagnose();
 
+        expect(result.status).toBe('ok');
         expect(result.registered).toBe(true);
         expect(result.pathExists).toBe(true);
         expect(result.isExecutable).toBe(true);
@@ -221,6 +238,7 @@ describe('ProtocolRegistrar.diagnose', () => {
 
         const result = await registrar.diagnose();
 
+        expect(result.status).toBe('degraded');
         expect(result.registered).toBe(true);
         expect(result.pathExists).toBe(true);
         expect(result.isExecutable).toBe(false);
@@ -234,10 +252,12 @@ describe('ProtocolRegistrar.diagnose', () => {
 
         const result = await registrar.diagnose();
 
+        expect(result.status).toBe('ok');
         expect(result.registered).toBe(true);
         expect(result.cliPath).toBe('/usr/local/bin/Glassbox');
         expect(result.pathExists).toBe(true);
         expect(result.isExecutable).toBe(true);
+        expect(result.issues).toHaveLength(0);
     });
 });
 
