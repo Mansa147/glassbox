@@ -953,6 +953,13 @@ Local WASM Replay Mode:
 		if err != nil {
 			return errors.WrapSimulatorNotFound(err.Error())
 		}
+		// Ensure the child simulator process is killed on Ctrl-C or any early
+		// return from this function.  registerRunnerCloseHook wires into the
+		// shutdown.Coordinator so the process group is reaped within the
+		// shutdownTimeout budget even when the signal fires while runner.Run is
+		// blocked waiting for the subprocess.
+		defer runner.Close()
+		registerRunnerCloseHook("debug-simulator", runner)
 
 		// Determine timestamps to simulate
 		timestamps := []int64{TimestampFlag}
@@ -1449,19 +1456,34 @@ Local WASM Replay Mode:
 				}
 				fmt.Fprintf(os.Stderr, "Exporting %d-step trace as %s to %s...\n",
 					len(execTrace.States), targetFmt, outPath)
-				doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
-				exportErr := trace.ExportWithCompatibility(execTrace, targetFmt, outPath, trace.ExportOptions{}, trace.DefaultCompatibilityOptions())
-				doneExport(exportErr)
-				if exportErr != nil {
-					fmt.Fprintf(os.Stderr,
-						"%s Trace export failed: %v\n"+
-							"  Fix: check that the output directory exists and you have write permissions.\n"+
-							"  Path: %s\n",
-						visualizer.Symbol("error"), exportErr, outPath,
-					)
+
+				// Guard: abort export immediately if the context was already
+				// cancelled so we never write a partial file.
+				if ctx.Err() != nil {
+					fmt.Fprintf(os.Stderr, "Trace export skipped: operation was cancelled.\n")
 				} else {
-					sizeStr := traceExportedFileSize(outPath)
-					fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), outPath, sizeStr)
+					doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+					exportErr := trace.ExportWithCompatibility(execTrace, targetFmt, outPath, trace.ExportOptions{}, trace.DefaultCompatibilityOptions())
+					doneExport(exportErr)
+					if exportErr != nil {
+						// Remove any partial file the exporter may have created
+						// before the error was returned, then tell the user.
+						_ = os.Remove(outPath)
+						if ctx.Err() != nil {
+							fmt.Fprintf(os.Stderr,
+								"Trace export cancelled — partial file removed: %s\n", outPath)
+						} else {
+							fmt.Fprintf(os.Stderr,
+								"%s Trace export failed: %v\n"+
+									"  Fix: check that the output directory exists and you have write permissions.\n"+
+									"  Path: %s\n",
+								visualizer.Symbol("error"), exportErr, outPath,
+							)
+						}
+					} else {
+						sizeStr := traceExportedFileSize(outPath)
+						fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), outPath, sizeStr)
+					}
 				}
 			}
 		}
@@ -1547,6 +1569,12 @@ Local WASM Replay Mode:
 			}
 		}
 
+		// Translate context cancellation into the canonical ErrInterrupted so
+		// the caller (run() in main.go) emits "Interrupted." instead of a raw
+		// context error, and the exit code is 130 rather than 3.
+		if ctx.Err() != nil {
+			return ErrInterrupted
+		}
 		return nil
 	},
 }

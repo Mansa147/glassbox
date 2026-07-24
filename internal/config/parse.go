@@ -13,6 +13,21 @@ import (
 	"github.com/dotandev/glassbox/internal/errors"
 )
 
+// splitLines, trimSpace, hasPrefix, splitKeyVal, parseInt are thin wrappers
+// used by DetectSchemaVersion in config.go to avoid importing "strings" there.
+func splitLines(s string) []string    { return strings.Split(s, "\n") }
+func trimSpace(s string) string       { return strings.TrimSpace(s) }
+func hasPrefix(s, p string) bool      { return strings.HasPrefix(s, p) }
+func parseInt(s string) (int, error)  { return strconv.Atoi(strings.TrimSpace(s)) }
+
+func splitKeyVal(line string) (key, val string, ok bool) {
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return strings.TrimSpace(parts[0]), strings.Trim(strings.TrimSpace(parts[1]), "\"'"), true
+}
+
 // activeConfigFile records which config file was loaded during the last call
 // to loadFromFile. It is reset on each call.
 var activeConfigFile string
@@ -169,7 +184,25 @@ func (c *Config) loadTOML(path string) error {
 		return err
 	}
 
-	return c.parseTOML(string(data))
+	content := string(data)
+
+	// Reject files that declare a schema version newer than this binary supports.
+	// Pre-versioning files (schema_version absent) are treated as version 1.
+	v, vErr := DetectSchemaVersion(content)
+	if vErr != nil {
+		return vErr
+	}
+	if v > CurrentSchemaVersion {
+		return errors.WrapConfigError(
+			"config file declares schema_version "+strconv.Itoa(v)+
+				" but this Glassbox binary only supports up to version "+
+				strconv.Itoa(CurrentSchemaVersion)+
+				"; upgrade Glassbox or run 'glassbox config migrate --path "+path+"' with a newer binary",
+			nil,
+		)
+	}
+
+	return c.parseTOML(content)
 }
 
 func (c *Config) parseTOML(content string) error {
@@ -203,6 +236,12 @@ func (c *Config) parseTOML(content string) error {
 		value := strings.Trim(rawVal, "\"'")
 
 		switch key {
+		case "schema_version":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return errors.WrapValidationError("schema_version must be a non-negative integer")
+			}
+			c.SchemaVersion = n
 		case "rpc_url":
 			c.RpcUrl = value
 		case "rpc_urls":
