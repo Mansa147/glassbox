@@ -69,41 +69,56 @@ type Frame struct {
 type Parser struct {
 	data       *dwarf.Data
 	binaryType string // "wasm", "elf", "macho", "pe"
+	caps       *Capabilities
 }
 
-// NewParser creates a new DWARF parser from a binary
+// Capabilities returns the DWARF capability report for the binary this parser
+// was created from. The report is computed by NewParser at construction time
+// and describes the DWARF version, present debug sections, and any structured
+// warnings (unsupported version, missing sections, or partial debug info) with
+// remediation hints. It is nil for a Parser not created via NewParser.
+func (p *Parser) Capabilities() *Capabilities {
+	return p.caps
+}
+
+// NewParser creates a new DWARF parser from a binary. On success the returned
+// parser carries a capability report (see Parser.Capabilities) describing the
+// binary's DWARF version and available mappings.
 func NewParser(data []byte) (*Parser, error) {
 	if len(data) < 4 {
 		return nil, ErrInvalidWASM
 	}
 
-	// Detect binary type and try to parse DWARF info
-	// Check for WASM (WebAssembly) magic number
-	if data[0] == 0x00 && data[1] == 0x61 && data[2] == 0x73 && data[3] == 0x6d {
-		return parseWASM(data)
+	var parser *Parser
+	var err error
+
+	switch {
+	// Check for WASM (WebAssembly) magic number.
+	case data[0] == 0x00 && data[1] == 0x61 && data[2] == 0x73 && data[3] == 0x6d:
+		parser, err = parseWASM(data)
+
+	// Try ELF.
+	case data[0] == 0x7f && data[1] == 0x45 && data[2] == 0x4c && data[3] == 0x46:
+		parser, err = parseELF(data)
+
+	// Try Mach-O.
+	case binary.BigEndian.Uint32(data[0:4]) == 0xfeedfacf ||
+		binary.LittleEndian.Uint32(data[0:4]) == 0xfeedfacf:
+		parser, err = parseMacho(data)
+
+	// Try PE.
+	case len(data) >= 2 && binary.LittleEndian.Uint16(data[0:2]) == 0x5a4d:
+		parser, err = parsePE(data)
+
+	default:
+		return nil, ErrInvalidWASM
 	}
 
-	// Try ELF
-	if data[0] == 0x7f && data[1] == 0x45 && data[2] == 0x4c && data[3] == 0x46 {
-		return parseELF(data)
+	if err != nil {
+		return nil, err
 	}
-
-	// Try Mach-O
-	if len(data) >= 4 {
-		if binary.BigEndian.Uint32(data[0:4]) == 0xfeedfacf ||
-			binary.LittleEndian.Uint32(data[0:4]) == 0xfeedfacf {
-			return parseMacho(data)
-		}
-	}
-
-	// Try PE
-	if len(data) >= 2 {
-		if binary.LittleEndian.Uint16(data[0:2]) == 0x5a4d {
-			return parsePE(data)
-		}
-	}
-
-	return nil, ErrInvalidWASM
+	parser.caps = DetectCapabilities(data)
+	return parser, nil
 }
 
 // parseWASM parses DWARF info from a WASM binary

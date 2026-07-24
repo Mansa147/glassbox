@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -257,6 +258,9 @@ Performance notes:
 			diagCollector = diagnostics.Noop()
 		}
 
+		// Capture the cobra context so we can check for Ctrl-C throughout.
+		ctx := cmd.Context()
+
 		// Apply theme if specified, otherwise auto-detect.
 		if traceThemeFlag != "" {
 			visualizer.SetTheme(visualizer.Theme(traceThemeFlag))
@@ -409,6 +413,10 @@ Performance notes:
 			writeErr := os.WriteFile(traceOutputJSON, jsonData, 0o644)
 			doneExport(writeErr)
 			if writeErr != nil {
+				removeIfCancelled(ctx, traceOutputJSON)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to write JSON export to %q: %v\n"+
 						"  Fix: ensure you have write permissions and sufficient disk space",
@@ -485,6 +493,10 @@ Performance notes:
 			mdErr := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown)
 			doneExport(mdErr)
 			if mdErr != nil {
+				removeIfCancelled(ctx, traceExportMarkdown)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as Markdown to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
@@ -567,6 +579,10 @@ Performance notes:
 			exportErr := trace.ExportWithCompatibility(executionTrace, traceExportFormat, traceExportPath, opts, trace.DefaultCompatibilityOptions())
 			doneExport(exportErr)
 			if exportErr != nil {
+				removeIfCancelled(ctx, traceExportPath)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as %s to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
@@ -611,15 +627,9 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceTimingsFlag, "timings", false, "Print per-phase timing breakdown to stderr after the operation completes")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
-	_ = traceCmd.RegisterFlagCompletionFunc("export-format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"summary", "normal", "verbose"}, cobra.ShellCompDirectiveNoFileComp
-	})
+	_ = traceCmd.RegisterFlagCompletionFunc("export-format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", completeTraceVerbosityFlag)
 
 	rootCmd.AddCommand(traceCmd)
 }
@@ -653,4 +663,18 @@ func printTimings(cmd *cobra.Command, dc *diagnostics.Collector, active bool) {
 		return
 	}
 	dc.PrintHuman(cmd.ErrOrStderr())
+}
+
+// removeIfCancelled deletes path when ctx is cancelled and the file exists.
+// It is called after a write error to ensure no partial output is left on disk
+// when the operation was interrupted by Ctrl-C.  Errors from Remove are
+// intentionally ignored — a best-effort cleanup is all we need here.
+func removeIfCancelled(ctx context.Context, path string) {
+	if ctx.Err() == nil {
+		return
+	}
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
 }

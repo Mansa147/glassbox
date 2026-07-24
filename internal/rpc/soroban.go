@@ -42,6 +42,31 @@ func (c *Client) selectSorobanURL() string {
 	return c.SorobanURL
 }
 
+// PoolDiagnostics returns the diagnostic trace from the most recent pool
+// operation. The returned value is a snapshot; it is overwritten on the next
+// call that uses the pool.
+func (c *Client) PoolDiagnostics() AttemptDiagnostics {
+	return c.LastAttemptDiagnostics
+}
+
+// IsPinned reports whether the client's provider pool is locked to a single
+// endpoint (replay-pin mode).
+func (c *Client) IsPinned() bool {
+	if c.providerPool == nil {
+		return false
+	}
+	return c.providerPool.IsPinned()
+}
+
+// PinnedProviderURL returns the URL of the pinned endpoint when the client is
+// in replay-pin mode, or an empty string otherwise.
+func (c *Client) PinnedProviderURL() string {
+	if c.providerPool == nil {
+		return ""
+	}
+	return c.providerPool.PinnedURL()
+}
+
 // rotateSorobanURL switches to the next Soroban endpoint after a failure.
 // It records the failure on the selector and returns the next candidate URL.
 func (c *Client) rotateSorobanURL(failedURL string) string {
@@ -486,6 +511,37 @@ type SimulateTransactionResponse struct {
 
 // SimulateTransaction calls Soroban RPC simulateTransaction using a base64 TransactionEnvelope XDR.
 func (c *Client) SimulateTransaction(ctx context.Context, envelopeXdr string) (*SimulateTransactionResponse, error) {
+	// Use the provider pool when available — it provides ordered failover,
+	// health tracking, per-attempt deadlines, and replay pinning.
+	if c.providerPool != nil {
+		var result *SimulateTransactionResponse
+		diag, err := c.providerPool.Do(ctx, func(attemptCtx context.Context, url string) (int, error) {
+			resp, attemptErr := c.simulateTransactionAttemptURL(attemptCtx, envelopeXdr, url)
+			if attemptErr != nil {
+				// Extract HTTP status if available from the error.
+				return 0, attemptErr
+			}
+			result = resp
+			return 0, nil
+		})
+		c.LastAttemptDiagnostics = diag
+		if err == nil {
+			if diag.SucceededURL != "" {
+				if c.selector != nil {
+					c.selector.RecordSuccess(diag.SucceededURL)
+				}
+				c.markSuccess(diag.SucceededURL)
+			}
+			return result, nil
+		}
+		logger.Logger.Warn("SimulateTransaction failed after all pool attempts",
+			"succeeded_url", diag.SucceededURL,
+			"attempts", len(diag.Attempts),
+		)
+		return nil, err
+	}
+
+	// Legacy path (no pool configured).
 	attempts := c.sorobanEndpointAttempts()
 	activeURL := c.selectSorobanURL()
 	var failures []NodeFailure
@@ -615,6 +671,31 @@ func (c *Client) simulateTransactionAttemptURL(ctx context.Context, envelopeXdr 
 
 // GetHealth checks the health of the Soroban RPC endpoint.
 func (c *Client) GetHealth(ctx context.Context) (*GetHealthResponse, error) {
+	// Use the provider pool when available.
+	if c.providerPool != nil {
+		var result *GetHealthResponse
+		diag, err := c.providerPool.Do(ctx, func(attemptCtx context.Context, url string) (int, error) {
+			resp, attemptErr := c.getHealthAttemptURL(attemptCtx, url)
+			if attemptErr != nil {
+				return 0, attemptErr
+			}
+			result = resp
+			return 0, nil
+		})
+		c.LastAttemptDiagnostics = diag
+		if err == nil {
+			if diag.SucceededURL != "" {
+				if c.selector != nil {
+					c.selector.RecordSuccess(diag.SucceededURL)
+				}
+				c.markSuccess(diag.SucceededURL)
+			}
+			return result, nil
+		}
+		return nil, err
+	}
+
+	// Legacy path.
 	attempts := c.sorobanEndpointAttempts()
 	activeURL := c.selectSorobanURL()
 	var failures []NodeFailure

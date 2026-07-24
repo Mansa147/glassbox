@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/errors"
+	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -18,6 +19,7 @@ var (
 	sessionIDFlag          string
 	sessionNameFlag        string
 	sessionPinEndpointFlag string
+	sessionSavePlanFlag    bool // --plan: show execution plan without saving
 )
 
 // currentData holds the active session context from debug command
@@ -109,6 +111,19 @@ Validation:
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
+
+		// --plan: show what session save will do without any side effects.
+		if sessionSavePlanFlag {
+			dbPath := session.DefaultDBPath()
+			sessionID := sessionIDFlag
+			execPlan := plan.BuildSessionSavePlan(plan.SessionPlanOptions{
+				SessionID: sessionID,
+				Name:      sessionNameFlag,
+				DBPath:    dbPath,
+			})
+			fmt.Fprint(cmd.OutOrStdout(), execPlan.RenderText())
+			return nil
+		}
 
 		// Check if we have an active session
 		data := GetCurrentSession()
@@ -659,6 +674,7 @@ func init() {
 	sessionSaveCmd.Flags().StringVar(&sessionIDFlag, "id", "", "Custom session ID (default: auto-generated)")
 	sessionSaveCmd.Flags().StringVar(&sessionNameFlag, "name", "", "Bookmark name for this session snapshot")
 	sessionSaveCmd.Flags().StringVar(&sessionPinEndpointFlag, "pin-endpoint", "", "Pin an RPC endpoint URL with this session")
+	sessionSaveCmd.Flags().BoolVar(&sessionSavePlanFlag, "plan", false, "Print the execution plan (DB path, session ID) without saving")
 
 	sessionCmd.AddCommand(sessionSaveCmd)
 	sessionCmd.AddCommand(sessionResumeCmd)

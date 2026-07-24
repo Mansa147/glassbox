@@ -286,5 +286,9 @@ func init() {
 	checkBindingsCmd.Flags().BoolVar(&checkBindingsDebugMeta, "debug-metadata", false,
 		"Include ABI debug metadata in regenerated bindings")
 
+	_ = checkBindingsCmd.RegisterFlagCompletionFunc("spec-format", completeSpecFormatFlag)
+	_ = checkBindingsCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
+	_ = checkBindingsCmd.RegisterFlagCompletionFunc("runtime", completeBindingsRuntimeFlag)
+
 	rootCmd.AddCommand(checkBindingsCmd)
 }

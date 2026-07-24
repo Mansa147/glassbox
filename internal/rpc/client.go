@@ -65,6 +65,13 @@ type Client struct {
 	selector         *EndpointSelector
 	// failoverPolicy is the active policy used by the selector.
 	failoverPolicy   FailoverPolicy
+	// providerPool is the ordered-failover pool used for all Soroban RPC calls.
+	// It supersedes the legacy selector/circuit-breaker for new call paths.
+	providerPool     *ProviderPool
+	// LastAttemptDiagnostics holds the diagnostic trace from the most recent
+	// pool operation. Safe for read after a call returns; overwritten on the
+	// next call.
+	LastAttemptDiagnostics AttemptDiagnostics
 }
 
 func (c *Client) startMethodTimer(ctx context.Context, method string, attributes map[string]string) MethodTimer {

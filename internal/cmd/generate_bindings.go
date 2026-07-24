@@ -221,5 +221,10 @@ func init() {
 	generateBindingsCmd.Flags().StringVar(&bindingsFormatFlag, "format", "text",
 		"Output format: text or json")
 
+	_ = generateBindingsCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
+	_ = generateBindingsCmd.RegisterFlagCompletionFunc("runtime", completeBindingsRuntimeFlag)
+	_ = generateBindingsCmd.RegisterFlagCompletionFunc("spec-format", completeSpecFormatFlag)
+	_ = generateBindingsCmd.RegisterFlagCompletionFunc("format", completeGeneralFormatFlag)
+
 	rootCmd.AddCommand(generateBindingsCmd)
 }

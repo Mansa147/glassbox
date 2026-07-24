@@ -133,13 +133,39 @@ func (m *FallbackMapper) Resolve(wasmData []byte, addr uint64) *FallbackResult {
 	// ── Stage 5: nothing found ───────────────────────────────────────────────
 	return &FallbackResult{
 		Quality: MappingQualityUnknown,
-		Warning: fmt.Sprintf(
-			"[sourcemap] could not resolve source location for address 0x%x: "+
-				"binary has no DWARF debug info and no Cargo metadata was found. "+
-				"Recompile with debug = true in [profile.release] for accurate mappings.",
-			addr,
-		),
+		Warning: capabilityWarning(wasmData, addr),
 	}
+}
+
+// capabilityWarning builds a precise, actionable message explaining why no
+// source location could be resolved. It runs DWARF capability detection (which
+// never parses the debug tree, so it cannot fail on malformed data) to
+// distinguish an unsupported DWARF version, missing debug sections, and partial
+// debug info — each with its own compiler guidance — instead of emitting one
+// generic "no debug info" message.
+func capabilityWarning(wasmData []byte, addr uint64) string {
+	caps := dwarf.DetectCapabilities(wasmData)
+
+	if len(caps.Warnings) > 0 {
+		hints := make([]string, 0, len(caps.Warnings))
+		for _, w := range caps.Warnings {
+			hints = append(hints, w.String())
+		}
+		return fmt.Sprintf(
+			"[sourcemap] could not resolve source location for address 0x%x: %s",
+			addr, strings.Join(hints, "; "),
+		)
+	}
+
+	// Capabilities look sufficient but the address still did not resolve — the
+	// symbol for this specific address is absent, which is distinct from a
+	// parser limitation. Say so rather than blaming missing debug info.
+	return fmt.Sprintf(
+		"[sourcemap] no source location for address 0x%x: the binary has usable "+
+			"DWARF debug info (%s) but no symbol covers this address — it may be in "+
+			"stripped standard-library or runtime code.",
+		addr, caps.Summary(),
+	)
 }
 
 // tryFullDWARF attempts resolution using the standard DWARF line-number tables.
