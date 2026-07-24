@@ -67,6 +67,16 @@ type Store struct {
 	db *sql.DB
 }
 
+// DefaultDBPath returns the filesystem path where the session database is stored.
+// It is safe to call without opening the store.
+func DefaultDBPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.Glassbox/sessions.db"
+	}
+	return filepath.Join(homeDir, ".Glassbox", "sessions.db")
+}
+
 // NewStore creates or opens the session database
 func NewStore() (*Store, error) {
 	homeDir, err := os.UserHomeDir()

@@ -26,6 +26,7 @@ import (
 	"github.com/dotandev/glassbox/internal/logger"
 	"github.com/dotandev/glassbox/internal/lto"
 	"github.com/dotandev/glassbox/internal/perfmetrics"
+	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/profile"
 	"github.com/dotandev/glassbox/internal/replay"
 	"github.com/dotandev/glassbox/internal/rpc"
@@ -104,6 +105,7 @@ var (
 	pinEndpointFlag     string
 	showMetricsFlag     bool
 	debugDryRunFlag     bool
+	debugPlanFlag       bool // --plan: print execution plan and exit
 	sourceAliasFlag     string
 
 	// Telemetry flags (shared with root but also read in debug run path).
@@ -671,6 +673,73 @@ Local WASM Replay Mode:
 			return runDebugDryRun(cmd, cmdArgs[0])
 		}
 
+		// Plan: show what the command will do without performing any side effects.
+		if debugPlanFlag {
+			simBinary := ""
+			if simDep := checkSimulator(false); simDep.Installed {
+				simBinary = simDep.Path
+			}
+			simMode := "network"
+			if wasmPath != "" {
+				simMode = "local"
+			}
+			rpcEndpoint := rpcURLFlag
+			if rpcEndpoint == "" {
+				cfg, cfgErr := config.Load()
+				if cfgErr == nil {
+					if len(cfg.SorobanRpcUrls) > 0 {
+						rpcEndpoint = cfg.SorobanRpcUrls[0]
+					} else if cfg.RpcUrl != "" {
+						rpcEndpoint = cfg.RpcUrl
+					}
+				}
+			}
+			var extraEndpoints []string
+			if cfg, cfgErr := config.Load(); cfgErr == nil && len(cfg.SorobanRpcUrls) > 1 {
+				extraEndpoints = cfg.SorobanRpcUrls[1:]
+			}
+
+			var txHash string
+			if len(cmdArgs) > 0 {
+				txHash = cmdArgs[0]
+			}
+
+			execPlan := plan.BuildDebugPlan(plan.DebugPlanOptions{
+				TxHash:              txHash,
+				Network:             networkFlag,
+				RPCEndpoint:         rpcEndpoint,
+				AdditionalEndpoints: extraEndpoints,
+				PinnedEndpoint:      pinEndpointFlag,
+				SimulatorBinary:     simBinary,
+				SimulatorMode:       simMode,
+				WasmPath:            wasmPath,
+				SnapshotPath:        snapshotFlag,
+				SaveSnapshotsPath:   saveSnapshotsFlag,
+				LoadSnapshotsPath:   loadSnapshotsFlag,
+				TraceOutputFile:     traceOutputFile,
+				AuditKey:            auditKeyFlag,
+				PublishIPFS:         publishIPFSFlag,
+				IPFSNode:            ipfsNodeFlag,
+				PublishArweave:      publishArweaveFlag,
+				ArweaveGateway:      arweaveGatewayFlag,
+				ExportSVG:           exportSVGFlag,
+				CacheDisabled:       noCacheFlag,
+				JSONOutput:          clioutput.WantsJSON(debugJSONFlag, debugFormatFlag),
+			})
+
+			out := cmd.OutOrStdout()
+			if clioutput.WantsJSON(debugJSONFlag, debugFormatFlag) {
+				jsonOut, jsonErr := execPlan.RenderJSON()
+				if jsonErr != nil {
+					return fmt.Errorf("failed to render plan as JSON: %w", jsonErr)
+				}
+				fmt.Fprintln(out, jsonOut)
+			} else {
+				fmt.Fprint(out, execPlan.RenderText())
+			}
+			return nil
+		}
+
 		// Apply theme if specified, otherwise auto-detect
 		if themeFlag != "" {
 			visualizer.SetTheme(visualizer.Theme(themeFlag))
@@ -788,6 +857,12 @@ Local WASM Replay Mode:
 				if cfg.RetryTimeout > 0 {
 					opts = append(opts, rpc.WithCircuitBreakerTimeout(cfg.RetryTimeout))
 				}
+				// Apply request timeout as the per-attempt pool deadline.
+				if cfg.RequestTimeout > 0 {
+					opts = append(opts, rpc.WithRequestDeadline(
+						time.Duration(cfg.RequestTimeout)*time.Second,
+					))
+				}
 			}
 		}
 
@@ -796,6 +871,8 @@ Local WASM Replay Mode:
 				opts = append(opts, rpc.WithHorizonURL(pinEndpointFlag))
 				horizonURL = pinEndpointFlag
 			}
+			// Lock the provider pool to the pinned endpoint so replay is deterministic.
+			opts = append(opts, rpc.WithReplayPinProvider(pinEndpointFlag))
 			fmt.Printf("Pinned RPC endpoint: %s\n", pinEndpointFlag)
 		}
 
@@ -918,6 +995,10 @@ Local WASM Replay Mode:
 			}
 
 			fmt.Printf("Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
+			// Show which provider succeeded when the pool attempted failover.
+			if diag := client.PoolDiagnostics(); len(diag.Attempts) > 1 {
+				fmt.Printf("Provider failover occurred — succeeded via: %s\n", diag.SucceededURL)
+			}
 		}
 		keys, err := extractLedgerKeys(resp.ResultMetaXdr)
 		if err != nil {
@@ -2798,6 +2879,7 @@ func init() {
 
 	// Dry-run and metrics flags
 	debugCmd.Flags().BoolVar(&debugDryRunFlag, "dry-run", false, "Validate inputs and check environment without running a simulation")
+	debugCmd.Flags().BoolVar(&debugPlanFlag, "plan", false, "Print the execution plan (network requests, files, signing, outputs) and exit without running")
 	debugCmd.Flags().BoolVar(&showMetricsFlag, "show-metrics", false, "Print RPC and simulation performance metrics after the run")
 
 	// Decentralised audit storage flags
