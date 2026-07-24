@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/decoder"
+	"github.com/dotandev/glassbox/internal/diagnostics"
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/gasmodel"
 	"github.com/dotandev/glassbox/internal/trace"
@@ -34,6 +35,7 @@ var (
 	traceVerbosity       string
 	traceDryRunFlag      bool
 	traceShowTimingFlag  bool
+	traceTimingsFlag     bool // --timings: structured phase timing via diagnostics
 	traceForceFlag       bool
 	traceFormatAlias     string // --format is a user-friendly alias for --export-format
 
@@ -247,6 +249,14 @@ Performance notes:
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// diagCollector is active only when --timings is set.
+		var diagCollector *diagnostics.Collector
+		if traceTimingsFlag {
+			diagCollector = diagnostics.NewCollector()
+		} else {
+			diagCollector = diagnostics.Noop()
+		}
+
 		// Apply theme if specified, otherwise auto-detect.
 		if traceThemeFlag != "" {
 			visualizer.SetTheme(visualizer.Theme(traceThemeFlag))
@@ -287,8 +297,10 @@ Performance notes:
 			loadStart = time.Now()
 		}
 
+		doneLoad := diagCollector.Start(diagnostics.PhaseTraceLoad)
 		data, err := os.ReadFile(filename)
 		if err != nil {
+			doneLoad(err)
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to read trace file %q: %v\n"+
 					"  Fix: ensure you have read permissions for the file",
@@ -297,6 +309,7 @@ Performance notes:
 		}
 
 		executionTrace, err := trace.FromJSON(data)
+		doneLoad(err)
 		if err != nil {
 			return errors.WrapUnmarshalFailed(err,
 				fmt.Sprintf(
@@ -392,17 +405,21 @@ Performance notes:
 					err,
 				))
 			}
-			if err := os.WriteFile(traceOutputJSON, jsonData, 0o644); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			writeErr := os.WriteFile(traceOutputJSON, jsonData, 0o644)
+			doneExport(writeErr)
+			if writeErr != nil {
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to write JSON export to %q: %v\n"+
 						"  Fix: ensure you have write permissions and sufficient disk space",
-					traceOutputJSON, err,
+					traceOutputJSON, writeErr,
 				))
 			}
 			sizeStr := humanFileSize(int64(len(jsonData)))
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(jsonStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s (%s)\n", visualizer.Symbol("success"), traceOutputJSON, sizeStr)
 			return nil
 		}
@@ -438,10 +455,13 @@ Performance notes:
 				NoColor:      traceNoColor || NoColorFlag,
 				EventSchemas: eventSchemas,
 			}
+			doneRender := diagCollector.Start(diagnostics.PhaseTraceRender)
 			trace.PrintExecutionTrace(executionTrace, opts)
+			doneRender(nil)
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  render: %s\n", time.Since(printStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			return nil
 		}
 
@@ -461,17 +481,21 @@ Performance notes:
 				fmt.Fprintf(cmd.ErrOrStderr(), "Exporting %d steps as markdown...\n", len(executionTrace.States))
 				mdStart = time.Now()
 			}
-			if err := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			mdErr := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown)
+			doneExport(mdErr)
+			if mdErr != nil {
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as Markdown to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
-					traceExportMarkdown, err,
+					traceExportMarkdown, mdErr,
 				))
 			}
 			sizeStr := traceExportedFileSize(traceExportMarkdown)
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(mdStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), traceExportMarkdown, sizeStr)
 			return nil
 		}
@@ -539,11 +563,14 @@ Performance notes:
 			// Route through ExportWithCompatibility so size warnings and version
 			// information are correctly applied (bridges the gap between the
 			// lower-level ExportExecutionTraceWithOptions and the compatibility layer).
-			if err := trace.ExportWithCompatibility(executionTrace, traceExportFormat, traceExportPath, opts, trace.DefaultCompatibilityOptions()); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			exportErr := trace.ExportWithCompatibility(executionTrace, traceExportFormat, traceExportPath, opts, trace.DefaultCompatibilityOptions())
+			doneExport(exportErr)
+			if exportErr != nil {
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as %s to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
-					traceExportFormat, traceExportPath, err,
+					traceExportFormat, traceExportPath, exportErr,
 				))
 			}
 
@@ -551,6 +578,7 @@ Performance notes:
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(exportStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), traceExportPath, sizeStr)
 			return nil
 		}
@@ -580,6 +608,7 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceDryRunFlag, "dry-run", false, "Validate parameters and trace data without writing any files")
 	traceCmd.Flags().BoolVar(&traceForceFlag, "force", false, "Overwrite existing output files without prompting")
 	traceCmd.Flags().BoolVar(&traceShowTimingFlag, "show-timing", false, "Print load, render, and export timing to stderr")
+	traceCmd.Flags().BoolVar(&traceTimingsFlag, "timings", false, "Print per-phase timing breakdown to stderr after the operation completes")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
 	_ = traceCmd.RegisterFlagCompletionFunc("export-format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
@@ -614,4 +643,14 @@ func traceExportOptions() (trace.ExportOptions, error) {
 		Comments:        traceComments,
 		SessionMetadata: metadata,
 	}, nil
+}
+
+// printTimings writes the diagnostics timing table to stderr when enabled.
+// It is a no-op when active is false, which keeps all non-timing code paths
+// clean without any conditional logic at each call site.
+func printTimings(cmd *cobra.Command, dc *diagnostics.Collector, active bool) {
+	if !active {
+		return
+	}
+	dc.PrintHuman(cmd.ErrOrStderr())
 }

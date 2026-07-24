@@ -22,6 +22,7 @@ import (
 	"github.com/dotandev/glassbox/internal/config"
 	"github.com/dotandev/glassbox/internal/decenstorage"
 	"github.com/dotandev/glassbox/internal/decoder"
+	"github.com/dotandev/glassbox/internal/diagnostics"
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/logger"
 	"github.com/dotandev/glassbox/internal/lto"
@@ -35,6 +36,7 @@ import (
 	"github.com/dotandev/glassbox/internal/snapshot"
 	"github.com/dotandev/glassbox/internal/sourcemap"
 	"github.com/dotandev/glassbox/internal/telemetry"
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/dotandev/glassbox/internal/tokenflow"
 	"github.com/dotandev/glassbox/internal/trace"
 	simtypes "github.com/dotandev/glassbox/internal/types"
@@ -103,6 +105,7 @@ var (
 	secureWorkspaceFlag bool
 	pinEndpointFlag     string
 	showMetricsFlag     bool
+	debugTimingsFlag    bool
 	debugDryRunFlag     bool
 	sourceAliasFlag     string
 
@@ -645,6 +648,14 @@ Local WASM Replay Mode:
 	},
 	RunE: func(cmd *cobra.Command, cmdArgs []string) error {
 		perfCollector := perfmetrics.NewCollector()
+		// diagCollector is active only when --timings is set; otherwise it is a
+		// zero-cost no-op so the hot path is not affected.
+		var diagCollector *diagnostics.Collector
+		if debugTimingsFlag {
+			diagCollector = diagnostics.NewCollector()
+		} else {
+			diagCollector = diagnostics.Noop()
+		}
 
 		if verbose {
 			logger.SetLevel(slog.LevelInfo)
@@ -662,6 +673,10 @@ Local WASM Replay Mode:
 			if showMetricsFlag {
 				return errors.WrapValidationError(
 					"--show-metrics cannot be used with --dry-run; no simulation is executed in dry-run mode")
+			}
+			if debugTimingsFlag {
+				return errors.WrapValidationError(
+					"--timings cannot be used with --dry-run; no simulation is executed in dry-run mode")
 			}
 			if len(cmdArgs) == 0 {
 				return errors.WrapValidationError(
@@ -909,10 +924,12 @@ Local WASM Replay Mode:
 		} else {
 			fmt.Printf("Fetching transaction: %s\n", txHash)
 			_t0 := time.Now()
+			doneRPC := diagCollector.Start(diagnostics.PhaseRPCFetch)
 			resp, err = client.GetTransaction(ctx, txHash)
 			if showMetricsFlag {
 				perfCollector.RecordRPC("getTransaction", time.Since(_t0), err != nil)
 			}
+			doneRPC(err)
 			if err != nil {
 				return errors.WrapRPCConnectionFailed(err)
 			}
@@ -1071,10 +1088,12 @@ Local WASM Replay Mode:
 				if showMetricsFlag {
 					perfCollector.StartSim()
 				}
+				doneSim := diagCollector.Start(diagnostics.PhaseSimulator)
 				simResp, err = runner.Run(ctx, simReq)
 				if showMetricsFlag {
 					perfCollector.StopSim()
 				}
+				doneSim(err)
 				if err != nil {
 					return errors.WrapSimulationFailed(err, "")
 				}
@@ -1268,7 +1287,13 @@ Local WASM Replay Mode:
 			suggestionEngine := decoder.NewSuggestionEngine()
 
 			// Decode events for analysis
+			doneDecode := diagCollector.Start(diagnostics.PhaseDecode)
 			callTree, err := decoder.DecodeEvents(lastSimResp.Events, maxDepth)
+			var decodeErr error
+			if err != nil {
+				decodeErr = err
+			}
+			doneDecode(decodeErr)
 			if err == nil && callTree != nil {
 				suggestions := suggestionEngine.AnalyzeCallTree(callTree)
 				if len(suggestions) > 0 {
@@ -1282,7 +1307,9 @@ Local WASM Replay Mode:
 		secDetector := security.NewDetector()
 		findings := secDetector.Analyze(resp.EnvelopeXdr, resp.ResultMetaXdr, lastSimResp.Events, lastSimResp.Logs)
 		if contractSourceFlag != "" {
+			doneSrcMap := diagCollector.Start(diagnostics.PhaseSourceMap)
 			sourceFindings, scanErr := secDetector.ScanSourcePath(contractSourceFlag, nil)
+			doneSrcMap(scanErr)
 			if scanErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: source vulnerability scan failed: %v\n", scanErr)
 			} else {
@@ -1422,12 +1449,15 @@ Local WASM Replay Mode:
 				}
 				fmt.Fprintf(os.Stderr, "Exporting %d-step trace as %s to %s...\n",
 					len(execTrace.States), targetFmt, outPath)
-				if err := trace.ExportWithCompatibility(execTrace, targetFmt, outPath, trace.ExportOptions{}, trace.DefaultCompatibilityOptions()); err != nil {
+				doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+				exportErr := trace.ExportWithCompatibility(execTrace, targetFmt, outPath, trace.ExportOptions{}, trace.DefaultCompatibilityOptions())
+				doneExport(exportErr)
+				if exportErr != nil {
 					fmt.Fprintf(os.Stderr,
 						"%s Trace export failed: %v\n"+
 							"  Fix: check that the output directory exists and you have write permissions.\n"+
 							"  Path: %s\n",
-						visualizer.Symbol("error"), err, outPath,
+						visualizer.Symbol("error"), exportErr, outPath,
 					)
 				} else {
 					sizeStr := traceExportedFileSize(outPath)
@@ -1499,6 +1529,21 @@ Local WASM Replay Mode:
 				_ = perfCollector.PrintJSON(cmd.OutOrStdout())
 			} else {
 				perfCollector.Print(cmd.OutOrStdout())
+			}
+		}
+
+		// --timings: write phase timing table to stderr so it never pollutes
+		// stdout / JSON output. For JSON mode we embed timings as a structured
+		// object on stderr (one JSON line) so CI tooling can parse it separately.
+		if debugTimingsFlag {
+			if clioutput.WantsJSON(debugJSONFlag, debugFormatFlag) {
+				enc := json.NewEncoder(cmd.ErrOrStderr())
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(map[string]interface{}{
+					"timings": diagCollector.BuildTimingsBlock(),
+				})
+			} else {
+				diagCollector.PrintHuman(cmd.ErrOrStderr())
 			}
 		}
 
@@ -1743,6 +1788,14 @@ func runLocalWasmReplaySession(ctx context.Context, runner simulator.RunnerInter
 
 	for {
 		if pending != nil {
+			// In non-interactive mode (pipe, CI, --non-interactive) we cannot
+			// block for user input. Auto-skip the reload and keep watching.
+			if termctx.GlobalNonInteractive() {
+				fmt.Fprintln(out, "[watcher] Non-interactive mode: reload skipped (re-run the command manually)")
+				pending = drainLatestReloadEvent(reloadEvents, lastAppliedHash)
+				continue
+			}
+
 			choice, promptErr := promptHotReloadChoice(reader, out)
 			if promptErr != nil {
 				return promptErr
@@ -2799,6 +2852,7 @@ func init() {
 	// Dry-run and metrics flags
 	debugCmd.Flags().BoolVar(&debugDryRunFlag, "dry-run", false, "Validate inputs and check environment without running a simulation")
 	debugCmd.Flags().BoolVar(&showMetricsFlag, "show-metrics", false, "Print RPC and simulation performance metrics after the run")
+	debugCmd.Flags().BoolVar(&debugTimingsFlag, "timings", false, "Print per-phase timing breakdown after the run (stderr for text; structured JSON when --format json)")
 
 	// Decentralised audit storage flags
 	debugCmd.Flags().StringVar(&auditKeyFlag, "audit-key", "", "Ed25519 private key (PEM) for signing the audit trail before publishing")

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/mattn/go-isatty"
 )
 
@@ -37,6 +38,11 @@ func (r *ANSIRenderer) IsTTY() bool {
 }
 
 func (r *ANSIRenderer) checkTTY() bool {
+	// Non-interactive mode (set by --non-interactive flag, CI env, or pipe
+	// detection) takes precedence over everything else.
+	if termctx.GlobalNonInteractive() {
+		return false
+	}
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		return false
 	}
@@ -62,6 +68,11 @@ func (r *ANSIRenderer) Println(a ...any) {
 }
 
 func (r *ANSIRenderer) ClearLine() {
+	// Suppress cursor-control sequences in non-interactive mode — they corrupt
+	// plain-text output in pipes, CI logs, and redirected streams.
+	if termctx.GlobalNonInteractive() {
+		return
+	}
 	fmt.Print("\r\033[K")
 }
 

@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/dotandev/glassbox/internal/endpoints"
-	"github.com/mattn/go-isatty"
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/spf13/cobra"
 )
 
@@ -84,13 +84,15 @@ func shouldRunInitWizard(cmd *cobra.Command, interactive bool) bool {
 	if !interactive {
 		return false
 	}
-
-	inFile, ok := cmd.InOrStdin().(*os.File)
-	if !ok {
+	// Respect the global non-interactive override (--non-interactive flag,
+	// CI env, or piped stdin detected at startup).
+	if termctx.GlobalNonInteractive() {
 		return false
 	}
-
-	return isatty.IsTerminal(inFile.Fd())
+	// Fall back to a per-call stdin TTY probe using termctx so tests can
+	// inject a pipe-backed reader without relying on os.Stdin.
+	tc := termctx.New(termctx.Options{Stdin: cmd.InOrStdin()})
+	return tc.StdinIsTTY()
 }
 
 func runInitWizard(cmd *cobra.Command, opts *initScaffoldOptions) error {
