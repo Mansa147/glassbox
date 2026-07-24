@@ -3,6 +3,7 @@
 .PHONY: build test lint validate-errors clean bench bench-rpc bench-sim bench-replay bench-sourcemap bench-profile bench-perf-regression
 .PHONY: fmt fmt-go fmt-rust pre-commit
 .PHONY: release release-linux release-darwin release-windows package verify-release ts-build
+.PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install
 
 # Build variables
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -240,3 +241,122 @@ pre-commit:
 		echo "⚠  pre-commit not found. Install: pip install pre-commit"; \
 		exit 1; \
 	fi
+
+# ──────────────────────────────────────────────
+# Mutation testing (gremlins)
+#
+# gremlins is a Go mutation testing tool that runs the existing test suite
+# against small code mutations to find untested branches.
+# https://github.com/go-gremlins/gremlins
+#
+# Focused package scope — only packages whose validation logic is worth
+# mutation-testing (config, trace export, session integrity, audit validation).
+# Expanding this set is cheap; shrinking it after the fact is painful.
+#
+# Agreed mutation score threshold: 70 % (documented in docs/ci-artifacts.md).
+# ──────────────────────────────────────────────
+
+# Packages in scope for mutation testing.
+# One per line so diffs are easy to review when scope changes.
+MUTATION_PACKAGES := \
+	./internal/cmd/... \
+	./internal/session/... \
+	./internal/trace/... \
+	./internal/simulator/...
+
+# HTML and JSON report output directory.
+MUTATION_REPORT_DIR ?= mutation-report
+
+# Minimum mutation score (0-100).  Jobs fail below this threshold.
+MUTATION_THRESHOLD ?= 70
+
+# Install gremlins from the pinned version used in CI.
+# Pin to a specific version so contributors get the same results locally.
+GREMLINS_VERSION ?= v0.5.1
+
+mutation-test-install:
+	@echo "Installing gremlins $(GREMLINS_VERSION)..."
+	@go install github.com/go-gremlins/gremlins/cmd/gremlins@$(GREMLINS_VERSION)
+	@echo "gremlins installed: $$(gremlins --version 2>&1 || true)"
+
+# Run mutation tests interactively.  Produces an HTML report in
+# $(MUTATION_REPORT_DIR)/ that can be opened in a browser.
+#
+# Usage:
+#   make mutation-test                  # use default packages and threshold
+#   make mutation-test MUTATION_THRESHOLD=60
+#   make mutation-test MUTATION_PACKAGES=./internal/session/...
+mutation-test: mutation-test-install
+	@echo "Running mutation tests..."
+	@echo "  Scope     : $(MUTATION_PACKAGES)"
+	@echo "  Threshold : $(MUTATION_THRESHOLD)%"
+	@echo "  Report    : $(MUTATION_REPORT_DIR)/"
+	@mkdir -p "$(MUTATION_REPORT_DIR)"
+	@gremlins unleash \
+		--threshold=$(MUTATION_THRESHOLD) \
+		--output=$(MUTATION_REPORT_DIR)/gremlins-report.json \
+		$(MUTATION_PACKAGES) \
+		2>&1 | tee "$(MUTATION_REPORT_DIR)/gremlins.log"
+	@echo "Mutation test complete.  Report: $(MUTATION_REPORT_DIR)/gremlins-report.json"
+
+# CI-mode mutation test: machine-readable JSON output only, no TTY spinner,
+# exits non-zero when the mutation score falls below MUTATION_THRESHOLD.
+# Called by .github/workflows/mutation-test.yml.
+mutation-test-ci: mutation-test-install
+	@mkdir -p "$(MUTATION_REPORT_DIR)"
+	gremlins unleash \
+		--threshold=$(MUTATION_THRESHOLD) \
+		--output=$(MUTATION_REPORT_DIR)/gremlins-report.json \
+		--silent \
+		$(MUTATION_PACKAGES) \
+		2>&1 | tee "$(MUTATION_REPORT_DIR)/gremlins.log"
+
+# Generate a human-readable summary from the last JSON report.
+# Prints surviving mutants grouped by package so contributors know where to
+# add tests.  Requires the JSON report to exist (run mutation-test first).
+mutation-test-report:
+	@if [ ! -f "$(MUTATION_REPORT_DIR)/gremlins-report.json" ]; then \
+		echo "No report found.  Run 'make mutation-test' first."; \
+		exit 1; \
+	fi
+	@echo "=== Mutation Test Summary ==="
+	@python3 - "$(MUTATION_REPORT_DIR)/gremlins-report.json" "$(MUTATION_THRESHOLD)" <<'PYEOF'
+import json, sys, collections
+
+report_path = sys.argv[1]
+threshold   = int(sys.argv[2])
+
+with open(report_path) as f:
+    data = json.load(f)
+
+total    = data.get("total_mutants", 0)
+killed   = data.get("killed",        0)
+survived = data.get("survived",      0)
+score    = round(killed / total * 100, 1) if total else 0.0
+
+print(f"  Total mutants : {total}")
+print(f"  Killed        : {killed}")
+print(f"  Survived      : {survived}")
+print(f"  Score         : {score}% (threshold: {threshold}%)")
+print()
+
+if survived:
+    by_pkg = collections.defaultdict(list)
+    for m in data.get("mutants", []):
+        if m.get("status") == "SURVIVED":
+            pkg = m.get("package", "unknown")
+            by_pkg[pkg].append(m)
+    print("Surviving mutants by package:")
+    for pkg in sorted(by_pkg):
+        print(f"  {pkg} ({len(by_pkg[pkg])} mutant(s))")
+        for m in by_pkg[pkg][:5]:
+            print(f"    • {m.get('file','?')}:{m.get('line','?')} — {m.get('mutation_type','?')}")
+        if len(by_pkg[pkg]) > 5:
+            print(f"    … and {len(by_pkg[pkg])-5} more (see full report)")
+
+if score < threshold:
+    print(f"\nFAIL: mutation score {score}% is below threshold {threshold}%")
+    sys.exit(1)
+else:
+    print(f"\nPASS: mutation score {score}% meets threshold {threshold}%")
+PYEOF

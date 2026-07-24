@@ -19,79 +19,156 @@ The primary goal of `Glassbox` is to eliminate the opaque "black box" experience
 5.  **GitHub Source Links**: Automatically generate clickable GitHub links to source code locations in traces (when in a Git repository).
 6.  **Error Suggestions**: Heuristic-based engine that suggests potential fixes for common Soroban errors.
 
-## Usage (MVP)
+## Usage
 
 ### Debugging a Transaction
 
-Fetches a transaction envelope from the Stellar Public network and prints its XDR size (Simulation pending).
+Fetches a transaction envelope from the Stellar network and simulates it locally.
 
 ```bash
-./Glassbox debug <transaction-hash> --network testnet
+# Debug on mainnet (network is auto-detected when the flag is omitted)
+glassbox debug <transaction-hash>
+
+# Debug explicitly on testnet
+glassbox debug --network testnet <transaction-hash>
+
+# Debug with a custom RPC endpoint
+glassbox debug --network testnet --rpc-url https://soroban-testnet.stellar.org <transaction-hash>
 ```
 
-Debug an offline envelope from stdin (no RPC):
+Debug an offline envelope from a local XDR file (no RPC required):
 
 ```bash
-./Glassbox debug < tx.xdr
+glassbox debug --xdr-file tx.xdr
 ```
 
-### Interactive Trace Viewer
-
-Launch an interactive terminal UI to explore transaction execution traces with search functionality.
+Or from a JSON envelope file:
 
 ```bash
-./Glassbox debug <transaction-hash> --interactive
-# or
-./Glassbox debug <transaction-hash> -i
+glassbox debug --json-file tx.json
 ```
 
-**Features:**
+Expected output:
 
-- **Search**: Press `/` to search through traces (contract IDs, functions, errors)
-- **Help overlay**: Press `?` or `h` to see all keyboard shortcuts
-- **Tree Navigation**: Expand/collapse nodes, navigate with arrow keys
-- **Syntax Highlighting**: Color-coded contract IDs, functions, and errors
-- **Fast Navigation**: Jump between search matches with `n`/`N`
-- **Match Counter**: See "Match 2 of 5" status while searching
+```
+Debugging transaction: 5c0a...
+Network: testnet
+Transaction fetched successfully. Envelope size: 312 bytes
 
-See [internal/trace/README.md](internal/trace/README.md) for detailed documentation.
+  ────────────────────────────────────────────────────────────
+  Result for  testnet
+
+  ✓  Status: success
+  ℹ  Snapshot: complete
+  ── Resource Usage
+    CPU Instructions: 12345 / 100000000  (0.01%)
+    Memory Bytes:     1024 / 41943040    (0.00%)
+    Operations:       1
+
+Session created: sess_abc123
+Run 'glassbox session save' to persist this session.
+```
+
+### Local WASM Replay
+
+Test a contract locally without any network connection:
+
+```bash
+glassbox debug --wasm ./target/wasm32-unknown-unknown/release/my_contract.wasm
+```
+
+Pass mock arguments:
+
+```bash
+glassbox debug --wasm ./contract.wasm --args "arg1" --args "arg2"
+```
+
+Enable hot-reload to automatically re-run when the WASM binary changes:
+
+```bash
+glassbox debug --wasm ./contract.wasm --hot-reload
+```
+
+### Demo Mode
+
+Print sample output to test color detection without any network or WASM:
+
+```bash
+glassbox debug --demo
+```
 
 ### Performance Profiling
 
-Generate interactive flamegraphs to visualize CPU and memory consumption during contract execution:
+Generate interactive flamegraphs to visualize CPU and memory consumption during contract execution.
+The `--profile` flag is a global (root-level) flag:
 
 ```bash
-./Glassbox debug --profile <transaction-hash>
+glassbox --profile debug <transaction-hash>
 ```
 
-This generates an interactive HTML file (`<tx-hash>.flamegraph.html`) with:
-- **Hover tooltips** showing frame details (function name, duration, percentage)
-- **Click-to-zoom** to focus on specific call stacks
-- **Search/highlight** to find frames by name
-- **Dark mode support** that adapts to your system theme
-
-**Export Formats:**
+Export format options:
 
 ```bash
 # Interactive HTML (default)
-./Glassbox debug --profile --profile-format html <transaction-hash>
+glassbox --profile --profile-format html debug <transaction-hash>
 
-# Raw SVG with dark mode support
-./Glassbox debug --profile --profile-format svg <transaction-hash>
+# Raw SVG
+glassbox --profile --profile-format svg debug <transaction-hash>
 ```
 
-See [docs/INTERACTIVE_FLAMEGRAPH.md](docs/INTERACTIVE_FLAMEGRAPH.md) for detailed documentation and [docs/examples/sample_flamegraph.html](docs/examples/sample_flamegraph.html) for a live demo.
+The flamegraph is written to `<tx-hash-prefix>.flamegraph.html` (or `.svg`) in the current directory.
 
-### Audit log signing (software / HSM)
+See [docs/trace-profiling.md](docs/trace-profiling.md) for detailed documentation and [docs/examples/sample_flamegraph.html](docs/examples/sample_flamegraph.html) for a live demo.
 
-`Glassbox` includes a utility command to generate a deterministic, signed audit log from a JSON payload.
+### Dry-Run Validation
+
+Validate all inputs and check the environment without running a simulation:
+
+```bash
+glassbox debug --dry-run --network testnet <transaction-hash>
+```
+
+This checks the transaction hash format, network validity, RPC reachability, simulator
+binary presence, and protocol version — no simulation is executed.
+
+### Comparing Networks
+
+Run the same transaction through two networks and diff the results:
+
+```bash
+glassbox debug --network testnet --compare-network mainnet <transaction-hash>
+```
+
+### Watch Mode
+
+Poll for a pending transaction and debug it once it lands on-chain:
+
+```bash
+glassbox debug --watch --watch-timeout 60 --network testnet <transaction-hash>
+```
+
+### Snapshot-Based Offline Replay
+
+Save ledger state during a debug run for later offline replay:
+
+```bash
+# Save snapshot registry while debugging
+glassbox debug --save-snapshots ./snapshots/my-tx.json --network testnet <transaction-hash>
+
+# Replay later without any network connection
+glassbox debug --load-snapshots ./snapshots/my-tx.json
+```
+
+### Audit Log Signing (software / HSM)
+
+`Glassbox` can generate a deterministic, signed audit log from a JSON payload.
 
 #### Software signing (Ed25519 private key)
 
-Provide a PKCS#8 PEM Ed25519 private key via env or CLI:
+Provide a PKCS#8 PEM Ed25519 private key via environment variable or flag:
 
 - Env: `GLASSBOX_AUDIT_PRIVATE_KEY_PEM`
-- CLI: `--software-private-key <pem-or-path>`
+- Flag: `--software-private-key <pem-or-path>`
 
 Example:
 
@@ -101,23 +178,33 @@ glassbox audit:sign \
   --software-private-key "$(cat ./ed25519-private-key.pem)"
 ```
 
+Read the payload from a file:
+
+```bash
+glassbox audit:sign --payload-file payload.json \
+  --software-private-key ./ed25519-private-key.pem
+```
+
 #### PKCS#11 HSM signing
 
-Select the PKCS#11 provider with `--hsm-provider pkcs11` and configure the module/token/key via env vars.
+Select the PKCS#11 provider with `--signing-provider pkcs11` and configure the module,
+token, and key via flags or environment variables.
 
-Required env vars:
+Required:
 
-- `GLASSBOX_PKCS11_MODULE` — path to the PKCS#11 module `.so`/`.dylib`/`.dll`
-- `GLASSBOX_PKCS11_PIN` — user PIN
-- `GLASSBOX_PKCS11_KEY_LABEL` **or** `GLASSBOX_PKCS11_KEY_ID` (hex)
+- `--pkcs11-module` / `GLASSBOX_PKCS11_MODULE` — path to the PKCS#11 `.so`/`.dylib`/`.dll`
+- `--pkcs11-pin` / `GLASSBOX_PKCS11_PIN` — user PIN
+- `--pkcs11-key-label` / `GLASSBOX_PKCS11_KEY_LABEL` **or** `--pkcs11-key-id` / `GLASSBOX_PKCS11_KEY_ID` (hex)
 
 Optional:
 
 - `GLASSBOX_PKCS11_SLOT` — numeric slot index (default `0`; must be a non-negative integer)
 - `GLASSBOX_PKCS11_TOKEN_LABEL` — select token by label
-- `GLASSBOX_PKCS11_PUBLIC_KEY_PEM` — SPKI PEM public key returned in the signed audit log
+- `GLASSBOX_PKCS11_PUBLIC_KEY_PEM` — SPKI PEM public key embedded in the signed audit log
 
-The Node.js PKCS#11 signer now keeps the module, session, and key lookup alive for the lifetime of the signer instance. If a cached session goes stale (for example after token removal or middleware reset), Glassbox clears it and retries once before returning an actionable error.
+The PKCS#11 signer keeps the module, session, and key handle alive for the lifetime of
+the signer instance. Stale sessions are retried once automatically before returning an
+error.
 
 Example:
 
@@ -127,19 +214,21 @@ export GLASSBOX_PKCS11_PIN=1234
 export GLASSBOX_PKCS11_KEY_LABEL=glassbox-audit-key
 
 glassbox audit:sign \
-  --hsm-provider pkcs11 \
+  --signing-provider pkcs11 \
   --payload '{"input":{},"state":{},"events":[],"timestamp":"2026-01-01T00:00:00.000Z"}'
 ```
 
 #### Validating PKCS#11 configuration
 
-Run a preflight check before signing to surface configuration errors with actionable remediation hints:
+Run a preflight check before signing to surface configuration errors with actionable hints:
 
 ```bash
-glassbox audit:sign --hsm-provider pkcs11 --validate-only
+glassbox audit:sign --signing-provider pkcs11 --validate-only \
+  --pkcs11-module /usr/lib/softhsm/libsofthsm2.so --pkcs11-pin 1234
 ```
 
-This checks module loading, slot enumeration, PIN authentication, key lookup, and a test signing operation — without touching any payload. Invalid `GLASSBOX_PKCS11_SLOT` values are rejected up front with a clear remediation hint.
+This verifies module loading, slot enumeration, PIN authentication, key lookup, and a test
+signing operation — without touching any payload.
 
 The command prints the signed audit log JSON to stdout so it can be redirected to a file.
 
@@ -147,43 +236,161 @@ For platform-specific module paths, YubiKey setup, and troubleshooting, see [doc
 
 ### Protocol Handler
 
-Glassbox registers a custom `glassbox://` URI scheme, allowing external tools (browsers, dashboards) to deep-link directly into a debug session.
+Glassbox registers a custom `glassbox://` URI scheme, allowing external tools (browsers,
+dashboards) to deep-link directly into a debug session.
 
 Register the protocol handler:
 
 ```bash
-./GLASSBOX Protocol:register
+glassbox protocol:register
+```
+
+Preview what registration would do without writing any OS state:
+
+```bash
+glassbox protocol:register --dry-run
 ```
 
 Open a debug session via URI:
 
 ```bash
-./GLASSBOX Protocol:handle "glassbox://debug/<transaction-hash>?network=testnet"
+glassbox protocol:handle "glassbox://debug/<transaction-hash>?network=testnet"
 ```
 
-With an optional operation index:
+With an optional operation index and view mode:
 
 ```bash
-./GLASSBOX Protocol:handle "glassbox://debug/<transaction-hash>?network=mainnet&op=0"
+glassbox protocol:handle "glassbox://debug/<transaction-hash>?network=mainnet&op=0&view=flamegraph"
+```
+
+Verify the registration is working:
+
+```bash
+glassbox protocol:verify
+```
+
+Diagnose registration issues:
+
+```bash
+glassbox protocol:diagnose
+```
+
+Repair a broken registration:
+
+```bash
+glassbox protocol:repair
+```
+
+Check current registration status:
+
+```bash
+glassbox protocol:status
 ```
 
 Unregister the handler when no longer needed:
 
 ```bash
-./GLASSBOX Protocol:unregister
+glassbox protocol:unregister
+```
+
+### Session Management
+
+```bash
+# Debug a transaction and save the session
+glassbox debug --network testnet <transaction-hash>
+glassbox session save
+
+# Save with a name for easy reference
+glassbox session save --name payroll-bug
+
+# List all saved sessions
+glassbox session list
+
+# Resume a session
+glassbox session resume <session-id>
+
+# Delete a session
+glassbox session delete <session-id>
+
+# Recover a session left by a crashed process
+glassbox session recover
+
+# Check sessions for schema and integrity problems
+glassbox session doctor
+```
+
+### Cache Management
+
+```bash
+# Check cache usage
+glassbox cache status
+
+# Include RPC cache statistics
+glassbox cache status --rpc
+
+# Clean old entries (LRU)
+glassbox cache clean
+
+# Clean without confirmation prompt
+glassbox cache clean --force
+
+# Remove RPC cache entries older than 7 days
+glassbox cache rpc --older-than 7
+
+# Remove all testnet RPC cache entries
+glassbox cache rpc --network testnet
+
+# Clear all cached data
+glassbox cache clear --force
+```
+
+### Telemetry
+
+```bash
+# Show current telemetry state and how to disable it
+glassbox telemetry
+```
+
+Telemetry is **opt-in only** and is disabled by default. To opt in, set `telemetry_enabled = true`
+in `~/.Glassbox/config.json` or run with `--telemetry`. To disable for the current shell session:
+
+```bash
+export GLASSBOX_TELEMETRY=false
+```
+
+No secrets are exported — transaction hashes, contract IDs, and file paths are sanitized
+client-side before any data leaves the machine.
+
+### Version Information
+
+```bash
+# Human-readable output
+glassbox version
+
+# Machine-readable JSON
+glassbox version --json
 ```
 
 ## Documentation
 
-- **[Architecture Overview](docs/architecture.md)**: Deep dive into how the Go CLI communicates with the Rust simulator, including data flow, IPC mechanisms, and design decisions.
-- **[Project Proposal](docs/proposal.md)**: Detailed project proposal and roadmap.
 - **[Source Mapping](docs/source-mapping.md)**: Implementation details for mapping WASM failures to Rust source code.
 - **[JSON CLI Output](docs/json-output.md)**: Machine-readable `--json` / `--format json` options for automation.
-- **[Debug Symbols Guide](docs/debug-symbols-guide.md)**: How to compile Soroban contracts with debug symbols.
-- **[Error Suggestions](docs/ERROR_SUGGESTIONS.md)**: Heuristic-based error suggestion engine for common Soroban errors.
-- **[Canonical JSON Serialization](docs/CANONICAL_JSON.md)**: Deterministic JSON serialization for audit log hashing.
+- **[Audit Log Signing](docs/audit-signing.md)**: Software and HSM signing for audit logs.
+- **[Audit KMS Signing](docs/audit-kms-signing.md)**: AWS KMS signing integration.
+- **[Canonicalization](docs/audit-canonicalization.md)**: Deterministic JSON serialization for audit log hashing.
+- **[Trace Profiling](docs/trace-profiling.md)**: CPU/memory flamegraph generation from contract traces.
+- **[Trace Export Validation](docs/trace-export-validation.md)**: Validated `--trace-output` and format options.
+- **[Incremental Trace Refresh](docs/incremental-trace-refresh.md)**: Incremental trace viewer state persistence.
+- **[Snapshot Deduplication](docs/snapshot-deduplication.md)**: How ledger snapshots are deduplicated.
+- **[Binding Validation](docs/binding-validation.md)**: ABI binding generation and validation.
+- **[Sandboxed Replay](docs/sandboxed-replay.md)**: Isolated WASM replay in a sandboxed environment.
+- **[Session Bookmarking](docs/session-bookmarking.md)**: Persistent session management and bookmarks.
+- **[Security Warnings](docs/security-warnings.md)**: Deprecated host functions and security findings.
+- **[Telemetry Metadata](docs/telemetry-metadata.md)**: What telemetry data is collected and how.
+- **[Telemetry Sampling](docs/telemetry-sampling.md)**: Sampling strategy for telemetry events.
+- **[Watch Mode](docs/WATCH_MODE.md)**: `--watch` and `--watch-files` polling modes.
+- **[Regression Test Guide](docs/regression-test-guide.md)**: How to write structured regression tests.
 - **[Interactive Trace Showcase](docs/showcase/README.md)**: Try out the interactive trace explorer online.
-- **[Time Travel Guide](docs/TIME_TRAVEL_GUIDE.md)**: How to use Magic Rewind to replay transactions across time, save sessions to disk, and share reproducible debug files.
 
 ## Technical Analysis
 
@@ -198,8 +405,6 @@ Stellar's `soroban-env-host` executes WASM. When it traps (crashes), the specifi
 1.  **Fetching Data**: Using the Stellar RPC to get the `TransactionEnvelope` and `LedgerFootprint` (read/write set) for the block where the tx failed.
 2.  **Simulation Environment**: A Rust binary (`glassbox-sim`) that integrates with `soroban-env-host` to replay transactions.
 3.  **Execution**: Feeding the inputs into the VM and capturing `diagnostic_events`.
-
-For a detailed explanation of the architecture, see [docs/architecture.md](docs/architecture.md).
 
 ## How to Contribute
 
@@ -243,17 +448,6 @@ We are building this open-source to help the entire Stellar community. All contr
 
 ### Code Quality & Linting
 
-## Telemetry and Privacy
-
-Glassbox includes optional telemetry to help diagnose runtime issues. Privacy-preserving defaults and explicit opt-in are enforced:
-
-- **Opt-in by default**: Telemetry is disabled unless explicitly enabled via config or environment.
-- **Config options**: Set `telemetry_enabled` and `telemetry_endpoint` in your Glassbox config (`~/.Glassbox/config.json`), or use the environment variables `GLASSBOX_TELEMETRY` and `GLASSBOX_TELEMETRY_ENDPOINT`.
-- **No secrets**: Identifiers such as transaction hashes, contract IDs, and file paths are sanitized or fingerprinted client-side before export.
-- **Session control**: Run `glassbox telemetry` to view the current state and follow the printed instructions to disable telemetry for your shell session (e.g. `export GLASSBOX_TELEMETRY=false`).
-
-If you have additional privacy concerns, file an issue and we will work with you to provide stricter controls.
-
 This project enforces strict linting rules to maintain code quality. See [docs/STRICT_LINTING.md](docs/STRICT_LINTING.md) for details.
 
 Quick commands:
@@ -276,6 +470,17 @@ The CI pipeline fails immediately on:
 - Unused variables, imports, or functions
 - Dead code
 - Any linting warnings
+
+### Telemetry and Privacy
+
+Glassbox includes optional telemetry to help diagnose runtime issues. Privacy-preserving defaults and explicit opt-in are enforced:
+
+- **Opt-in by default**: Telemetry is disabled unless explicitly enabled via config or environment.
+- **Config options**: Set `telemetry_enabled` and `telemetry_endpoint` in your Glassbox config (`~/.Glassbox/config.json`), or use the environment variables `GLASSBOX_TELEMETRY` and `GLASSBOX_TELEMETRY_ENDPOINT`.
+- **No secrets**: Identifiers such as transaction hashes, contract IDs, and file paths are sanitized or fingerprinted client-side before export.
+- **Session control**: Run `glassbox telemetry` to view the current state and follow the printed instructions to disable telemetry for your shell session.
+
+If you have additional privacy concerns, file an issue and we will work with you to provide stricter controls.
 
 ### Code Standards
 
@@ -394,6 +599,7 @@ docs: Add comprehensive contribution guidelines
 - **Unit Tests**: All new functions must have unit tests
 - **Coverage**: Aim for 80%+ coverage. Critical paths should have 90%+ coverage
 - **Integration Tests**: Include tests that verify feature interactions
+- **Regression Tests**: See [docs/regression-test-guide.md](docs/regression-test-guide.md) for the structured regression template
 - **Running Tests**:
   ```bash
   # Go tests
@@ -404,7 +610,7 @@ docs: Add comprehensive contribution guidelines
   cargo test --all
   cargo test --all --release
   ```
-- **Bench Tests**: For performance-critical code, include benchmarks
+- **Bench Tests**: For performance-critical code, include benchmarks:
   ```bash
   go test -bench=. -benchmem ./...
   ```
@@ -442,7 +648,6 @@ docs: Add comprehensive contribution guidelines
 5. **Address feedback**:
    - Make requested changes
    - Commit with descriptive messages
-   - Force-push if necessary: `git push -f origin feat/my-feature`
 
 ### Linting and Formatting
 
@@ -466,6 +671,18 @@ make lint
 make format
 ```
 
+### Documentation Check
+
+A script is provided to verify that all command invocations in the README match the
+actual CLI surface:
+
+```bash
+scripts/check-readme-commands.sh
+```
+
+Run it before submitting a PR that touches README.md or any `internal/cmd/*.go` file.
+It exits non-zero and prints each unknown command reference if any are found.
+
 ### Binary Size Tracking
 
 To prevent regressions in artifact sizes, Glassbox tracks the compiled sizes of both the Go CLI and Rust simulator.
@@ -487,7 +704,7 @@ See [docs/proposal.md](docs/proposal.md) for the detailed proposal.
 
 #### Running a single test
 ```bash
-go test -run TestName ./package
+go test -run TestName ./package/...
 ```
 
 #### Profiling a test
@@ -498,7 +715,7 @@ go tool pprof cpu.prof
 
 #### Building for a specific OS
 ```bash
-GOOS=linux GOARCH=amd64 go build -o Glassbox-linux-amd64 ./cmd/glassbox
+GOOS=linux GOARCH=amd64 go build -o glassbox-linux-amd64 ./cmd/glassbox
 ```
 
 #### Cleaning build artifacts
@@ -559,4 +776,4 @@ This project follows the [all-contributors](https://github.com/all-contributors/
 
 ---
 
-_Erst is an open-source initiative. Contributions, PRs, and Issues are welcome._
+_Glassbox is an open-source initiative. Contributions, PRs, and Issues are welcome._

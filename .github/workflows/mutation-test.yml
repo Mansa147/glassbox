@@ -1,0 +1,262 @@
+# Copyright 2026 Glassbox Users
+# SPDX-License-Identifier: Apache-2.0
+#
+# mutation-test.yml
+#
+# Runs mutation testing with gremlins against the validation packages listed
+# in MUTATION_PACKAGES (Makefile variable).  Uploads an actionable HTML/JSON
+# report as a GitHub Actions artifact and posts a summary to the job summary.
+#
+# Trigger policy
+# ───────────────
+# • Scheduled weekly (Sunday 02:00 UTC) so surviving-mutant debt is visible
+#   to maintainers even without a PR.
+# • On pull requests that touch validation-critical packages so new code is
+#   immediately checked.
+# • Manually via workflow_dispatch (contributors can run on any branch).
+#
+# Failure policy
+# ───────────────
+# The job fails when the mutation score falls below MUTATION_THRESHOLD (70 %).
+# The report is ALWAYS uploaded — even on pass — so reviewers can inspect
+# surviving mutants.  The retention period is longer than failure artifacts
+# because mutation reports are not sensitive.
+#
+# See docs/ci-artifacts.md for report retrieval instructions.
+
+name: Mutation Tests
+
+on:
+  schedule:
+    # Weekly: Sunday 02:00 UTC
+    - cron: "0 2 * * 0"
+
+  pull_request:
+    paths:
+      # Only run when validation-critical code changes.
+      - "internal/cmd/**"
+      - "internal/session/**"
+      - "internal/trace/**"
+      - "internal/simulator/**"
+      - "Makefile"
+      - ".github/workflows/mutation-test.yml"
+
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: "Mutation score threshold (0-100, default 70)"
+        required: false
+        default: "70"
+      packages:
+        description: "Go package pattern to mutate (default: all scoped packages)"
+        required: false
+        default: ""
+
+concurrency:
+  group: mutation-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Required for posting to job summary and PR checks.
+  checks: write
+
+env:
+  MUTATION_REPORT_DIR: mutation-report
+  # Default threshold; overridden by workflow_dispatch input when provided.
+  MUTATION_THRESHOLD: ${{ github.event.inputs.threshold || '70' }}
+  GREMLINS_VERSION: "v0.5.1"
+
+jobs:
+  mutation-test:
+    name: Mutation test (${{ github.event_name }})
+    runs-on: ubuntu-latest
+    # Mutation testing is slow; give it enough time for the full package scope.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # Disable module cache so gremlins sees a clean state on each run.
+          cache: true
+
+      # ── Install gremlins ───────────────────────────────────────────────────
+      - name: Install gremlins
+        run: |
+          go install github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}
+          echo "gremlins version: $(gremlins --version 2>&1 || true)"
+
+      # ── Resolve package scope ──────────────────────────────────────────────
+      # Use the workflow_dispatch input when present; fall back to the Makefile
+      # default scope so the two stay in sync.
+      - name: Resolve mutation package scope
+        id: scope
+        run: |
+          if [ -n "${{ github.event.inputs.packages }}" ]; then
+            echo "packages=${{ github.event.inputs.packages }}" >> "$GITHUB_OUTPUT"
+          else
+            # Extract MUTATION_PACKAGES from the Makefile (strip line continuations).
+            pkgs=$(grep -A 20 '^MUTATION_PACKAGES' Makefile \
+              | sed '/^\s*$/q' \
+              | grep '\./internal' \
+              | tr -d '\\' \
+              | tr '\n' ' ' \
+              | xargs)
+            echo "packages=${pkgs}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Run mutation tests ─────────────────────────────────────────────────
+      - name: Run mutation tests
+        id: mutate
+        run: |
+          mkdir -p "${MUTATION_REPORT_DIR}"
+          # gremlins exits non-zero when score < threshold; capture that to
+          # allow the report upload step to always run.
+          set +e
+          gremlins unleash \
+            --threshold="${MUTATION_THRESHOLD}" \
+            --output="${MUTATION_REPORT_DIR}/gremlins-report.json" \
+            --silent \
+            ${{ steps.scope.outputs.packages }} \
+            2>&1 | tee "${MUTATION_REPORT_DIR}/gremlins.log"
+          MUTATION_EXIT=$?
+          set -e
+          echo "exit_code=${MUTATION_EXIT}" >> "$GITHUB_OUTPUT"
+          # Always exit 0 here; the final "gate" step decides the job outcome.
+          exit 0
+
+      # ── Generate human-readable summary ───────────────────────────────────
+      - name: Generate mutation summary
+        if: always()
+        id: summary
+        run: |
+          REPORT="${MUTATION_REPORT_DIR}/gremlins-report.json"
+          if [ ! -f "${REPORT}" ]; then
+            echo "score=0" >> "$GITHUB_OUTPUT"
+            echo "total=0" >> "$GITHUB_OUTPUT"
+            echo "survived=0" >> "$GITHUB_OUTPUT"
+            echo "No report generated — gremlins may have crashed." \
+              >> "${MUTATION_REPORT_DIR}/summary.txt"
+            exit 0
+          fi
+
+          python3 - "${REPORT}" "${MUTATION_THRESHOLD}" \
+            "${MUTATION_REPORT_DIR}/summary.txt" \
+            "$GITHUB_OUTPUT" <<'PYEOF'
+import json, sys, collections, pathlib
+
+report_path   = sys.argv[1]
+threshold     = int(sys.argv[2])
+summary_path  = sys.argv[3]
+output_path   = sys.argv[4]
+
+with open(report_path) as f:
+    data = json.load(f)
+
+total    = data.get("total_mutants", 0)
+killed   = data.get("killed",        0)
+survived = data.get("survived",      0)
+score    = round(killed / total * 100, 1) if total else 0.0
+status   = "PASS" if score >= threshold else "FAIL"
+
+lines = [
+    f"## Mutation Test Results",
+    f"",
+    f"| Metric | Value |",
+    f"|--------|-------|",
+    f"| Total mutants | {total} |",
+    f"| Killed | {killed} |",
+    f"| Survived | {survived} |",
+    f"| Score | **{score}%** |",
+    f"| Threshold | {threshold}% |",
+    f"| Status | **{status}** |",
+    f"",
+]
+
+if survived:
+    by_pkg = collections.defaultdict(list)
+    for m in data.get("mutants", []):
+        if m.get("status") == "SURVIVED":
+            pkg = m.get("package", "unknown")
+            by_pkg[pkg].append(m)
+
+    lines += ["### Surviving mutants by package", ""]
+    for pkg in sorted(by_pkg):
+        lines.append(f"#### `{pkg}` ({len(by_pkg[pkg])} surviving)")
+        for m in by_pkg[pkg][:10]:
+            loc  = f"{m.get('file','?')}:{m.get('line','?')}"
+            kind = m.get("mutation_type", "?")
+            lines.append(f"- `{loc}` — {kind}")
+        if len(by_pkg[pkg]) > 10:
+            lines.append(f"- … and {len(by_pkg[pkg])-10} more (see full JSON report)")
+        lines.append("")
+
+    lines += [
+        "> **Tip:** surviving mutants indicate untested branches.",
+        "> Add tests for meaningful ones; document noise as accepted via",
+        "> `// mutation:skip` comments after review.",
+        "",
+    ]
+
+summary_text = "\n".join(lines)
+pathlib.Path(summary_path).write_text(summary_text)
+
+with open(output_path, "a") as f:
+    f.write(f"score={score}\n")
+    f.write(f"total={total}\n")
+    f.write(f"survived={survived}\n")
+    f.write(f"status={status}\n")
+PYEOF
+
+      # ── Post to GitHub job summary ─────────────────────────────────────────
+      - name: Post summary to job
+        if: always()
+        run: |
+          if [ -f "${MUTATION_REPORT_DIR}/summary.txt" ]; then
+            cat "${MUTATION_REPORT_DIR}/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ── Upload report (always, not just on failure) ────────────────────────
+      # Mutation reports are not sensitive; retain them longer so maintainers
+      # can track surviving-mutant trends across scheduled runs.
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report-${{ github.run_id }}
+          path: ${{ env.MUTATION_REPORT_DIR }}/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── Gate: fail the job if threshold was not met ────────────────────────
+      - name: Enforce mutation score threshold
+        if: always()
+        run: |
+          EXIT="${{ steps.mutate.outputs.exit_code }}"
+          SCORE="${{ steps.summary.outputs.score }}"
+          THRESHOLD="${MUTATION_THRESHOLD}"
+
+          echo "Mutation score : ${SCORE}%"
+          echo "Threshold      : ${THRESHOLD}%"
+
+          if [ "${EXIT}" != "0" ]; then
+            echo ""
+            echo "FAIL: mutation score ${SCORE}% is below the agreed threshold of ${THRESHOLD}%."
+            echo ""
+            echo "Next steps:"
+            echo "  1. Download the artifact 'mutation-report-${{ github.run_id }}' from the Actions UI."
+            echo "     See docs/ci-artifacts.md for retrieval instructions."
+            echo "  2. Open mutation-report/gremlins-report.json or review the summary above."
+            echo "  3. For each surviving mutant:"
+            echo "     a. Add a test that kills it, OR"
+            echo "     b. Add a '// mutation:skip' comment with justification if it is noise."
+            echo "  4. Re-run this workflow to confirm the score has improved."
+            exit 1
+          fi
+
+          echo "PASS: mutation score ${SCORE}% meets the threshold of ${THRESHOLD}%."
