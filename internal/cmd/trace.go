@@ -582,15 +582,9 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceShowTimingFlag, "show-timing", false, "Print load, render, and export timing to stderr")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
-	_ = traceCmd.RegisterFlagCompletionFunc("export-format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"summary", "normal", "verbose"}, cobra.ShellCompDirectiveNoFileComp
-	})
+	_ = traceCmd.RegisterFlagCompletionFunc("export-format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", completeTraceVerbosityFlag)
 
 	rootCmd.AddCommand(traceCmd)
 }

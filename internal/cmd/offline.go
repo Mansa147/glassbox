@@ -284,6 +284,7 @@ func init() {
 	offlineGenerateCmd.Flags().StringVarP(&offlineOutputFlag, "output", "o", "", "Output file path (default: unsigned.Glassbox.json)")
 	offlineGenerateCmd.Flags().StringVar(&offlineDescFlag, "desc", "", "Human-readable description to embed in the file")
 	offlineGenerateCmd.Flags().StringVar(&offlineSourceFlag, "source", "", "Source account address to embed in metadata")
+	_ = offlineGenerateCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
 
 	// sign flags
 	offlineSignCmd.Flags().StringVar(&offlineKeyFlag, "key", "", "Hex-encoded ed25519 private key (32-byte seed or 64-byte full key)")

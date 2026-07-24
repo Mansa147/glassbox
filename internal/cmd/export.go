@@ -254,6 +254,8 @@ func init() {
 	exportCmd.Flags().BoolVar(&exportIncludeMemoryFlag, "include-memory", false, "Include Wasm linear memory dump from simulation response when available")
 	exportCmd.Flags().StringVar(&exportFormatFlag, "format", "text", "Output format: text or json")
 
+	_ = exportCmd.RegisterFlagCompletionFunc("format", completeExportFormatFlag)
+
 	exportDecodeMemoryCmd.Flags().StringVar(&decodeSnapshotFlag, "snapshot", "", "Snapshot file that contains linear memory")
 	exportDecodeMemoryCmd.Flags().IntVar(&decodeOffsetFlag, "offset", 0, "Start offset in bytes (must be >= 0)")
 	exportDecodeMemoryCmd.Flags().IntVar(&decodeLengthFlag, "length", 256, "Number of bytes to print (must be > 0)")

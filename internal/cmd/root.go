@@ -408,4 +408,9 @@ func init() {
 
 	// Register commands
 	rootCmd.AddCommand(statsCmd)
+
+	// Register completion for persistent (root-level) enum flags so every
+	// subcommand inherits correct suggestions for --log-level and --profile-format.
+	_ = rootCmd.RegisterFlagCompletionFunc("log-level", completeLogLevelFlag)
+	_ = rootCmd.RegisterFlagCompletionFunc("profile-format", completeProfileFormatFlag)
 }

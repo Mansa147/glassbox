@@ -542,7 +542,6 @@ func validatePKCS11SignInputs(cfg signer.Pkcs11Config) error {
 			"pkcs11 signing requires one of --pkcs11-key-label (CKA_LABEL) or --pkcs11-key-id (hex CKA_ID)\n" +
 				"  Fix: set GLASSBOX_PKCS11_KEY_LABEL or GLASSBOX_PKCS11_KEY_ID, or use the corresponding --pkcs11-* flag")
 	}
-	}
 
 	return nil
 }

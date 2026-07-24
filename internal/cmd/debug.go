@@ -2811,6 +2811,14 @@ func init() {
 	// Source alias mapping flag
 	debugCmd.Flags().StringVar(&sourceAliasFlag, "source-alias", "", "Path to a JSON file mapping embedded source paths to local directory paths")
 
+	// Enum-flag completion registrations (never performs network I/O)
+	_ = debugCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("format", completeGeneralFormatFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("trace-verbosity", completeTraceVerbosityFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("view", completeViewModeFlag)
+	_ = debugCmd.RegisterFlagCompletionFunc("profile-format", completeProfileFormatFlag)
+
 	rootCmd.AddCommand(debugCmd)
 }
 
