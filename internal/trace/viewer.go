@@ -41,6 +41,10 @@ type InteractiveViewer struct {
 	fetchDelay  time.Duration
 	// search holds all search/filter state and persists across commands.
 	search *SearchState
+	// stateFP is the trace fingerprint used to key persisted viewer state.
+	// Computed once at construction; the fingerprinted fields never change
+	// during a viewing session.
+	stateFP string
 }
 
 type fetchedState struct {
@@ -62,6 +66,7 @@ func NewInteractiveViewer(trace *ExecutionTrace) *InteractiveViewer {
 		fetchErr:    make(map[int]string),
 		fetchCh:     make(chan fetchedState, 32),
 		search:      NewSearchState(),
+		stateFP:     trace.Fingerprint(),
 	}
 
 	// Index all trace nodes for search.
@@ -87,6 +92,7 @@ func NewInteractiveViewerWithWASM(trace *ExecutionTrace, wasmData []byte) *Inter
 		fetchErr:    make(map[int]string),
 		fetchCh:     make(chan fetchedState, 32),
 		search:      NewSearchState(),
+		stateFP:     trace.Fingerprint(),
 	}
 
 	// Index all trace nodes for search.
@@ -113,8 +119,11 @@ func NewInteractiveViewerWithWASM(trace *ExecutionTrace, wasmData []byte) *Inter
 func (v *InteractiveViewer) Start() error {
 	defer v.saveViewerState()
 	termW := getTermWidth()
-	// Attempt to restore persisted viewer state for this transaction.
-	if st, ok, err := session.LoadViewerState(v.trace.TransactionHash); err == nil && ok {
+	// Attempt to restore persisted viewer state for this trace. State is
+	// keyed by content fingerprint, so a re-fetched trace whose steps have
+	// changed simply starts fresh instead of applying stale state.
+	restored := false
+	if st, ok, err := session.LoadViewerState(v.stateFP); err == nil && ok {
 		if st.CurrentStep >= 0 && st.CurrentStep < len(v.trace.States) {
 			_, _ = v.trace.JumpToStep(st.CurrentStep)
 		}
@@ -129,11 +138,16 @@ func (v *InteractiveViewer) Start() error {
 		}
 		v.eventFilter = st.EventFilter
 		v.hideStdLib = st.HideStdLib
+		restored = true
 	}
 	fmt.Printf("%s Glassbox Interactive Trace Viewer\n", visualizer.Symbol("magnify"))
 	fmt.Println(separator(termW))
 	fmt.Printf("Transaction: %s\n", v.trace.TransactionHash)
 	fmt.Printf("Total Steps: %d\n\n", len(v.trace.States))
+	if restored {
+		fmt.Println("Restored viewer state from your previous session (type 'reset' to clear).")
+		fmt.Println()
+	}
 
 	// Show trap info at startup if detected
 	if v.trap != nil {
@@ -295,6 +309,8 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 	case "quit", "exit":
 		fmt.Printf("Goodbye! %s\n", visualizer.Symbol("wave"))
 		return true
+	case "reset":
+		v.resetViewerState(parts[1:])
 	case "rewind":
 		v.rewindToStart()
 	case "y", "yank", "copy":
@@ -716,19 +732,54 @@ func (v *InteractiveViewer) handleFetchedState(f fetchedState) {
 	delete(v.fetchErr, f.step)
 }
 
-// saveViewerState persists minimal interactive UI state for this trace.
+// saveViewerState persists minimal interactive UI state for this trace,
+// keyed by the trace content fingerprint.
 func (v *InteractiveViewer) saveViewerState() {
-	if v.trace == nil || v.trace.TransactionHash == "" {
+	if v.trace == nil || v.stateFP == "" {
 		return
 	}
 	st := session.ViewerState{
+		TxHash:       v.trace.TransactionHash,
 		CurrentStep:  v.trace.CurrentStep,
 		SearchQuery:  v.search.Query(),
 		CurrentMatch: v.search.CurrentMatchNumber(),
 		EventFilter:  v.eventFilter,
 		HideStdLib:   v.hideStdLib,
 	}
-	_ = session.SaveViewerState(v.trace.TransactionHash, st)
+	_ = session.SaveViewerState(v.stateFP, st)
+}
+
+// resetViewerState deletes persisted viewer state. With no argument it clears
+// the sidecar for the current trace and restores in-session defaults; with
+// "all" it clears every persisted viewer state record.
+func (v *InteractiveViewer) resetViewerState(args []string) {
+	if len(args) > 0 && strings.EqualFold(args[0], "all") {
+		n, err := session.ResetAllViewerState()
+		if err != nil {
+			fmt.Printf("%s Failed to reset viewer state: %v\n", visualizer.Error(), err)
+			return
+		}
+		fmt.Printf("Cleared %d persisted viewer state record(s).\n", n)
+		return
+	}
+
+	existed, err := session.ResetViewerState(v.stateFP)
+	if err != nil {
+		fmt.Printf("%s Failed to reset viewer state: %v\n", visualizer.Error(), err)
+		return
+	}
+	// Restore in-session defaults so the reset takes effect immediately.
+	v.search.ClearSearch()
+	v.eventFilter = ""
+	v.hideStdLib = false
+	if len(v.trace.States) > 0 {
+		_, _ = v.trace.JumpToStep(0)
+	}
+	if existed {
+		fmt.Println("Viewer state reset: persisted state cleared and defaults restored.")
+	} else {
+		fmt.Println("Viewer state reset: no persisted state found; defaults restored.")
+	}
 }
 
 func (v *InteractiveViewer) statusBarLine(state *ExecutionState) string {
@@ -1186,6 +1237,7 @@ func (v *InteractiveViewer) showHelp() {
 	fmt.Println("  sp, split            - Open expanded split pane")
 	fmt.Println("  ?, h, help           - Show this help")
 	fmt.Println("  y, yank <a/r> [idx]  - Copy raw XDR")
+	fmt.Println("  reset [all]          - Clear persisted viewer state (this trace, or all traces)")
 	fmt.Println("  q, quit, exit        - Exit viewer")
 }
 
