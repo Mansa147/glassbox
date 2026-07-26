@@ -14,6 +14,7 @@ import (
 
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/logger"
+	"github.com/dotandev/glassbox/internal/telemetry"
 )
 
 // RetryConfig defines the retry behavior
@@ -139,10 +140,15 @@ func (r *Retrier) Do(ctx context.Context, req *http.Request) (*http.Response, er
 		}
 
 		resp, err := r.client.Do(req.Clone(ctx))
+		corrID := telemetry.CorrelationIDFromContext(ctx)
 		if err != nil {
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				logger.Logger.Debug("Request failed, will retry", "attempt", attempt+1, "error", err)
+				debugArgs := []interface{}{"attempt", attempt + 1, "error", err}
+				if corrID != "" {
+					debugArgs = append(debugArgs, "correlation_id", corrID)
+				}
+				logger.Logger.Debug("Request failed, will retry", debugArgs...)
 			}
 			backoff = r.nextBackoff(backoff)
 			continue
@@ -159,11 +165,15 @@ func (r *Retrier) Do(ctx context.Context, req *http.Request) (*http.Response, er
 			lastErr = fmt.Errorf("status code %d", resp.StatusCode)
 			retryAfter := r.getRetryAfter(resp)
 
-			logger.Logger.Warn("Rate limited or temporary failure, will retry",
-				"attempt", attempt+1,
+			warnArgs := []interface{}{
+				"attempt", attempt + 1,
 				"status_code", resp.StatusCode,
 				"retry_after", retryAfter,
-			)
+			}
+			if corrID != "" {
+				warnArgs = append(warnArgs, "correlation_id", corrID)
+			}
+			logger.Logger.Warn("Rate limited or temporary failure, will retry", warnArgs...)
 
 			_ = resp.Body.Close()
 
@@ -217,10 +227,15 @@ func (rt *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		resp, err := rt.transport.RoundTrip(req)
+		corrID := telemetry.CorrelationIDFromContext(req.Context())
 		if err != nil {
 			lastErr = err
 			if attempt < rt.config.MaxRetries {
-				logger.Logger.Debug("RoundTrip failed, will retry", "attempt", attempt+1, "error", err)
+				debugArgs := []interface{}{"attempt", attempt + 1, "error", err}
+				if corrID != "" {
+					debugArgs = append(debugArgs, "correlation_id", corrID)
+				}
+				logger.Logger.Debug("RoundTrip failed, will retry", debugArgs...)
 			}
 			backoff = rt.nextBackoff(backoff)
 			continue
@@ -237,11 +252,15 @@ func (rt *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			lastErr = fmt.Errorf("status code %d", resp.StatusCode)
 			retryAfter := rt.getRetryAfter(resp)
 
-			logger.Logger.Warn("Rate limited or temporary failure, will retry",
-				"attempt", attempt+1,
+			warnArgs := []interface{}{
+				"attempt", attempt + 1,
 				"status_code", resp.StatusCode,
 				"retry_after", retryAfter,
-			)
+			}
+			if corrID != "" {
+				warnArgs = append(warnArgs, "correlation_id", corrID)
+			}
+			logger.Logger.Warn("Rate limited or temporary failure, will retry", warnArgs...)
 
 			_ = resp.Body.Close()
 

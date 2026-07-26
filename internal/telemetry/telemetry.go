@@ -5,7 +5,9 @@ package telemetry
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -184,10 +186,14 @@ func RecordCommandUsage(ctx context.Context, command string) {
 	command = sanitizeCommandName(command)
 
 	// Set core command attributes
-	span.SetAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("command.name", command),
 		attribute.Bool("telemetry.anonymized", commandTelemetryAnonymized),
-	)
+	}
+	if corrID := CorrelationIDFromContext(ctx); corrID != "" {
+		attrs = append(attrs, attribute.String("correlation_id", corrID))
+	}
+	span.SetAttributes(attrs...)
 
 	// Add environment metadata (only if not anonymized)
 	if !commandTelemetryAnonymized {
@@ -206,6 +212,47 @@ func RecordCommandUsage(ctx context.Context, command string) {
 	}
 
 	span.AddEvent("command.usage")
+}
+
+type correlationKey struct{}
+
+// WithCorrelationID returns a new Context carrying the given correlation ID.
+func WithCorrelationID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, correlationKey{}, id)
+}
+
+// CorrelationIDFromContext extracts the correlation ID from ctx, returning "" if not found.
+func CorrelationIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if id, ok := ctx.Value(correlationKey{}).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// NewCorrelationID generates a unique per-operation correlation ID.
+func NewCorrelationID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("corr-%x", b)
+}
+
+// EnsureCorrelationID returns a Context with a correlation ID and the correlation ID string itself.
+// If ctx already has a correlation ID, it returns ctx unchanged along with that ID.
+func EnsureCorrelationID(ctx context.Context) (context.Context, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id := CorrelationIDFromContext(ctx); id != "" {
+		return ctx, id
+	}
+	id := NewCorrelationID()
+	return WithCorrelationID(ctx, id), id
 }
 
 // GetEnvMetadata returns the current environment metadata.
