@@ -12,6 +12,7 @@ import (
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/session"
+	"github.com/dotandev/glassbox/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -173,6 +174,11 @@ Validation:
 			// Log but don't fail on cleanup errors
 			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", err)
 		}
+
+		// Record this save in the session's provenance timeline before
+		// persisting, so the timeline itself is captured in the same write.
+		_ = session.RecordProvenance(data, session.ProvenanceSaved, session.ActorUser,
+			version.Version, data.EnvFingerprint, "", true)
 
 		// Save with validation so corrupt or incomplete sessions are rejected
 		// early with a clear diagnostic instead of a silent partial write.
@@ -598,6 +604,8 @@ Validation:
 
 		data.Status = "recovered"
 		data.LastAccessAt = time.Now()
+		_ = session.RecordProvenance(data, session.ProvenanceRecovered, session.ActorSystem,
+			version.Version, data.EnvFingerprint, "recovered from crash checkpoint", true)
 		if saveErr := store.SaveWithValidation(ctx, data); saveErr != nil {
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to update recovered session: %v", saveErr))

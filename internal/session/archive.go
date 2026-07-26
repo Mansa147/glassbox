@@ -98,19 +98,22 @@ func ExportArchive(data *Data, destPath string) error {
 	zw := zip.NewWriter(f)
 	defer func() { _ = zw.Close() }()
 
+	now := time.Now()
+
 	// Write meta.json.
 	meta := archiveMeta{
 		ArchiveVersion:  archiveVersion,
 		GlassboxVersion: version.Version,
-		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		CreatedAt:       now.UTC().Format(time.RFC3339),
 		SchemaVersion:   SchemaVersion,
 	}
-	if err := writeJSONEntry(zw, "meta.json", meta); err != nil {
+	if _, err := writeJSONEntry(zw, "meta.json", meta); err != nil {
 		return fmt.Errorf("failed to write meta.json: %w", err)
 	}
 
-	// Write session.json.
-	if err := writeJSONEntry(zw, "session.json", data); err != nil {
+	// Write session.json. Its bytes become the "metadata" manifest member.
+	sessionBytes, err := writeJSONEntry(zw, "session.json", data)
+	if err != nil {
 		return fmt.Errorf("failed to write session.json: %w", err)
 	}
 
@@ -128,6 +131,35 @@ func ExportArchive(data *Data, destPath string) error {
 		}
 	}
 
+	// Write the remaining canonical manifest members when the session
+	// carries them, then build and write the integrity manifest covering
+	// every embedded artifact (trace, bundle, source_map, annotations,
+	// metadata) — see Issue #56.
+	manifestMembers := map[string][]byte{"metadata": sessionBytes}
+
+	optionalMembers := []struct {
+		member, entry, content string
+	}{
+		{"trace", "trace.json", data.TraceJSON},
+		{"bundle", "bundle.json", data.BundleJSON},
+		{"source_map", "source_map.json", data.SourceMapJSON},
+		{"annotations", "annotations.json", data.AnnotationsJSON},
+	}
+	for _, om := range optionalMembers {
+		if om.content == "" {
+			continue
+		}
+		if err := writeStringEntry(zw, om.entry, om.content); err != nil {
+			return fmt.Errorf("failed to write %s: %w", om.entry, err)
+		}
+		manifestMembers[om.member] = []byte(om.content)
+	}
+
+	manifest := BuildManifest(manifestMembers, SchemaVersion, now)
+	if _, err := writeJSONEntry(zw, "manifest.json", manifest); err != nil {
+		return fmt.Errorf("failed to write manifest.json: %w", err)
+	}
+
 	return nil
 }
 
@@ -136,8 +168,26 @@ func ExportArchive(data *Data, destPath string) error {
 // version compatibility before returning, surfacing actionable errors for each
 // failure mode.
 func ImportArchive(srcPath string) (*Data, error) {
+	data, _, err := ImportArchiveWithManifest(srcPath)
+	return data, err
+}
+
+// manifestEntryNames are the zip entry names ImportArchiveWithManifest treats
+// as singleton members; encountering any of them more than once in an
+// archive indicates a corrupt or tampered file.
+var manifestEntryNames = map[string]bool{
+	"meta.json": true, "session.json": true, "manifest.json": true,
+	"trace.json": true, "bundle.json": true, "source_map.json": true, "annotations.json": true,
+}
+
+// ImportArchiveWithManifest behaves like ImportArchive but also returns the
+// ManifestReport produced by verifying the archive's embedded integrity
+// manifest (see Issue #56). report.Compatible is false for archives created
+// before manifests existed; this is the documented compatibility path and is
+// never treated as a failure on its own.
+func ImportArchiveWithManifest(srcPath string) (*Data, *ManifestReport, error) {
 	if strings.TrimSpace(srcPath) == "" {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"archive path is required\n" +
 				"  Fix: provide the path to a .gbx archive file\n" +
 				"  Example: glassbox session load ./session.gbx",
@@ -154,7 +204,7 @@ func ImportArchive(srcPath string) (*Data, error) {
 		}
 	}
 	if !validExt {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"unsupported archive extension %q — expected one of: %s\n"+
 				"  Fix: use a file exported by 'glassbox session share'\n"+
 				"  Example: glassbox session load ./session.gbx",
@@ -164,7 +214,7 @@ func ImportArchive(srcPath string) (*Data, error) {
 
 	zr, err := zip.OpenReader(srcPath)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"cannot open archive %q: %w\n"+
 				"  Fix: ensure the file exists, is readable, and is a valid Glassbox session archive",
 			srcPath, err,
@@ -172,16 +222,38 @@ func ImportArchive(srcPath string) (*Data, error) {
 	}
 	defer func() { _ = zr.Close() }()
 
+	// Detect duplicate entries for any singleton member before reading
+	// anything else — a repeated name indicates a corrupt or tampered
+	// archive and must never be silently resolved by "last one wins".
+	counts := make(map[string]int, len(zr.File))
+	for _, f := range zr.File {
+		if manifestEntryNames[f.Name] {
+			counts[f.Name]++
+		}
+	}
+	for name, count := range counts {
+		if count > 1 {
+			return nil, nil, fmt.Errorf(
+				"archive %q contains %d copies of %q — the archive is corrupt or was tampered with\n"+
+					"  Fix: re-export the archive with 'glassbox session share'",
+				srcPath, count, name,
+			)
+		}
+	}
+
 	var meta archiveMeta
+	var manifest *Manifest
 	var data Data
 	metaFound := false
 	sessionFound := false
+	manifestFound := false
+	rawMembers := make(map[string][]byte, len(CanonicalManifestMembers))
 
 	for _, f := range zr.File {
 		switch f.Name {
 		case "meta.json":
 			if err := readJSONEntry(f, &meta); err != nil {
-				return nil, fmt.Errorf(
+				return nil, nil, fmt.Errorf(
 					"failed to read meta.json from archive: %w\n"+
 						"  Fix: the archive may be corrupt. Re-export it with 'glassbox session share'",
 					err,
@@ -189,42 +261,113 @@ func ImportArchive(srcPath string) (*Data, error) {
 			}
 			metaFound = true
 		case "session.json":
-			if err := readJSONEntry(f, &data); err != nil {
-				return nil, fmt.Errorf(
+			raw, err := readRawEntry(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
 					"failed to read session.json from archive: %w\n"+
 						"  Fix: the archive may be corrupt. Re-export it with 'glassbox session share'",
 					err,
 				)
 			}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				return nil, nil, fmt.Errorf(
+					"failed to read session.json from archive: %w\n"+
+						"  Fix: the archive may be corrupt. Re-export it with 'glassbox session share'",
+					err,
+				)
+			}
+			rawMembers["metadata"] = raw
 			sessionFound = true
+		case "manifest.json":
+			if err := readJSONEntry(f, &manifest); err != nil {
+				return nil, nil, fmt.Errorf(
+					"failed to read manifest.json from archive: %w\n"+
+						"  Fix: the archive may be corrupt. Re-export it with 'glassbox session share'",
+					err,
+				)
+			}
+			manifestFound = true
+		case "trace.json":
+			raw, err := readRawEntry(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read trace.json from archive: %w", err)
+			}
+			rawMembers["trace"] = raw
+		case "bundle.json":
+			raw, err := readRawEntry(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read bundle.json from archive: %w", err)
+			}
+			rawMembers["bundle"] = raw
+		case "source_map.json":
+			raw, err := readRawEntry(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read source_map.json from archive: %w", err)
+			}
+			rawMembers["source_map"] = raw
+		case "annotations.json":
+			raw, err := readRawEntry(f)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read annotations.json from archive: %w", err)
+			}
+			rawMembers["annotations"] = raw
 		}
 	}
 
 	if !metaFound {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"archive is missing meta.json — not a valid Glassbox session archive\n" +
 				"  Fix: use a file exported by 'glassbox session share'",
 		)
 	}
 	if !sessionFound {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"archive is missing session.json — not a valid Glassbox session archive\n" +
 				"  Fix: use a file exported by 'glassbox session share'",
 		)
 	}
 	if meta.ArchiveVersion > archiveVersion {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"archive version %d is newer than supported version %d\n"+
 				"  Fix: upgrade Glassbox to the latest release to open this archive",
 			meta.ArchiveVersion, archiveVersion,
 		)
 	}
 	if meta.SchemaVersion > SchemaVersion {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"session schema version %d is newer than supported version %d\n"+
 				"  Fix: upgrade Glassbox to the latest release to open this session",
 			meta.SchemaVersion, SchemaVersion,
 		)
+	}
+
+	// Verify every embedded artifact against the manifest before trusting
+	// it. Archives without a manifest.json (pre-Issue-#56) take the
+	// documented compatibility path: VerifyManifest reports OK=true,
+	// Compatible=false, and the session still loads.
+	if !manifestFound {
+		manifest = nil
+	}
+	manifestReport := VerifyManifest(manifest, rawMembers)
+	if !manifestReport.OK {
+		return nil, manifestReport, fmt.Errorf(
+			"archive %q %s", srcPath, FormatManifestIssues(manifestReport),
+		)
+	}
+
+	// Repopulate the archive-only artifact fields now that their hashes
+	// (when a manifest was present) have been verified.
+	if raw, ok := rawMembers["trace"]; ok {
+		data.TraceJSON = string(raw)
+	}
+	if raw, ok := rawMembers["bundle"]; ok {
+		data.BundleJSON = string(raw)
+	}
+	if raw, ok := rawMembers["source_map"]; ok {
+		data.SourceMapJSON = string(raw)
+	}
+	if raw, ok := rawMembers["annotations"]; ok {
+		data.AnnotationsJSON = string(raw)
 	}
 
 	// Validate the reconstructed session data so imported archives with missing
@@ -244,31 +387,43 @@ func ImportArchive(srcPath string) (*Data, error) {
 			}
 		}
 		sb.WriteString("Re-export with 'glassbox session share' from a valid session.")
-		return nil, fmt.Errorf("%s", sb.String())
+		return nil, manifestReport, fmt.Errorf("%s", sb.String())
 	}
 
-	return &data, nil
+	return &data, manifestReport, nil
 }
 
-// writeJSONEntry serialises v and writes it as a named entry in the zip.
+// writeJSONEntry serialises v and writes it as a named entry in the zip,
+// returning the exact bytes written so callers can hash them for a Manifest.
 // It uses deterministic key ordering for reproducible exports.
-func writeJSONEntry(zw *zip.Writer, name string, v interface{}) error {
-	w, err := zw.Create(name)
-	if err != nil {
-		return err
-	}
-
+func writeJSONEntry(zw *zip.Writer, name string, v interface{}) ([]byte, error) {
 	// Sort map keys recursively for deterministic output
 	sorted := SortMapKeys(v)
 
 	// Use json.Marshal for consistent ordering with sorted keys
 	data, err := json.MarshalIndent(sorted, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = w.Write(data)
-	return err
+	w, err := zw.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// readRawEntry returns the raw, undecoded bytes of a zip file entry.
+func readRawEntry(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
 }
 
 // writeStringEntry writes a plain string as a named entry in the zip.

@@ -28,7 +28,7 @@ func TestSanitizeErrorMessage_RemovesMacOSPath(t *testing.T) {
 }
 
 func TestSanitizeErrorMessage_RemovesStellarSecretKey(t *testing.T) {
-	secret := "SCZANGBA5AKIA4TDDKXGAI2NOOZVQZAHJPNZB3ZFEAKEOUYP4HFHGHNRH"
+	secret := "SCZANGBA5AKIA4TDDKXGAI2NOOZVQZAHJPNZB3ZFEAKEOUYP4HFHGHNR"
 	msg := "invalid key: " + secret
 	got := SanitizeErrorMessage(msg)
 	if strings.Contains(got, secret) {

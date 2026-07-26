@@ -6,6 +6,8 @@ package session
 import (
 	"fmt"
 	"strings"
+
+	"github.com/dotandev/glassbox/internal/version"
 )
 
 // MinSupportedSchemaVersion is the oldest session schema version that can be
@@ -137,6 +139,8 @@ func UpgradeSessionData(data *Data) (upgraded bool, err error) {
 		return false, nil
 	}
 
+	fromVersion := data.SchemaVersion
+
 	// v0 → v1: legacy rows may lack env_fingerprint and pinned_endpoint.
 	if data.SchemaVersion < 1 {
 		if data.EnvFingerprint == "" {
@@ -145,5 +149,13 @@ func UpgradeSessionData(data *Data) (upgraded bool, err error) {
 	}
 
 	data.SchemaVersion = SchemaVersion
+
+	// Record the migration in the session's provenance timeline so schema
+	// upgrades are visible in 'glassbox session provenance' output, not just
+	// inferred from the schema_version field. Best-effort: a provenance
+	// recording failure must never block the upgrade itself.
+	_ = RecordProvenance(data, ProvenanceMigrated, ActorSystem, version.Version, "",
+		fmt.Sprintf("schema upgraded from v%d to v%d", fromVersion, SchemaVersion), true)
+
 	return true, nil
 }

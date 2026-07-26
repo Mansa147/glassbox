@@ -60,6 +60,28 @@ type Data struct {
 	ErstVersion   string `json:"GLASSBOX_version"`
 	EnvFingerprint string `json:"env_fingerprint,omitempty"`
 	SchemaVersion int    `json:"schema_version"`
+
+	// Session provenance timeline [Issue #59]. Serialized ProvenanceTimeline
+	// JSON; append-only and bounded (see provenance.go).
+	ProvenanceJSON string `json:"provenance_json,omitempty"`
+
+	// User annotations attached to this session [Issue #58]. Persisted to
+	// the store like any other field but excluded from session.json
+	// (json:"-") so it forms its own independent, separately hashed
+	// "annotations" member in a session archive's integrity Manifest (see
+	// manifest.go). ImportSession's merge policy combines this field
+	// across colliding sessions instead of overwriting it.
+	AnnotationsJSON string `json:"-"`
+
+	// Archive-only artifacts [Issue #56]. Unlike AnnotationsJSON, these are
+	// never persisted to the SQLite store — they exist only as independent
+	// members of a shared session archive, each hashed separately in the
+	// archive's integrity Manifest. ExportArchive writes them as their own
+	// zip entries; ImportArchive repopulates them after verifying the
+	// manifest.
+	TraceJSON     string `json:"-"`
+	BundleJSON    string `json:"-"`
+	SourceMapJSON string `json:"-"`
 }
 
 // Store manages session persistence in SQLite
@@ -77,15 +99,22 @@ func DefaultDBPath() string {
 	return filepath.Join(homeDir, ".Glassbox", "sessions.db")
 }
 
-// NewStore creates or opens the session database
+// NewStore creates or opens the session database in the default location
+// (~/.Glassbox/sessions.db).
 func NewStore() (*Store, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
+	return NewStoreAt(filepath.Join(homeDir, ".Glassbox"))
+}
 
-	erstDir := filepath.Join(homeDir, ".Glassbox")
-	if err = os.MkdirAll(erstDir, 0755); err != nil {
+// NewStoreAt creates or opens the session database under glassboxDir instead
+// of the default ~/.Glassbox. It exists for tooling that needs to operate on
+// a non-default data directory, such as 'glassbox session gc --root'.
+func NewStoreAt(glassboxDir string) (*Store, error) {
+	erstDir := glassboxDir
+	if err := os.MkdirAll(erstDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create .Glassbox directory: %s",
 			SanitizeErrorMessage(err.Error()))
 	}
@@ -143,6 +172,8 @@ func (s *Store) initSchema() error {
 		sim_request_json TEXT,
 		sim_response_json TEXT,
 		env_fingerprint TEXT,
+		provenance_json TEXT,
+		annotations_json TEXT,
 		GLASSBOX_version TEXT,
 		schema_version INTEGER NOT NULL
 	);
@@ -162,6 +193,12 @@ func (s *Store) initSchema() error {
 		return err
 	}
 	if err := s.ensureColumn("sessions", "env_fingerprint", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "provenance_json", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "annotations_json", "TEXT"); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_name ON sessions(name) WHERE name IS NOT NULL AND name != ''`); err != nil {
@@ -340,6 +377,8 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		sim_request_json = excluded.sim_request_json,
 		sim_response_json = excluded.sim_response_json,
 		env_fingerprint = excluded.env_fingerprint,
+		provenance_json = excluded.provenance_json,
+		annotations_json = excluded.annotations_json,
 		GLASSBOX_version = excluded.GLASSBOX_version,
 		schema_version = excluded.schema_version
 	`
@@ -349,7 +388,7 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		data.Network, data.HorizonURL, data.TxHash,
 		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr, data.PinnedEndpoint,
 		data.AuditHash, data.AuditSignature, data.PreviousSessionHash,
-		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ErstVersion, data.SchemaVersion,
+		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ProvenanceJSON, data.AnnotationsJSON, data.ErstVersion, data.SchemaVersion,
 	)
 
 	if err != nil {
@@ -382,8 +421,8 @@ func (s *Store) SavePreservingSchemaVersion(ctx context.Context, data *Data) err
 	INSERT INTO sessions (
 		id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 		envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
-		sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		sim_request_json, sim_response_json, env_fingerprint, provenance_json, GLASSBOX_version, schema_version
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		last_access_at = excluded.last_access_at,
@@ -398,6 +437,7 @@ func (s *Store) SavePreservingSchemaVersion(ctx context.Context, data *Data) err
 		sim_request_json = excluded.sim_request_json,
 		sim_response_json = excluded.sim_response_json,
 		env_fingerprint = excluded.env_fingerprint,
+		provenance_json = excluded.provenance_json,
 		GLASSBOX_version = excluded.GLASSBOX_version,
 		schema_version = excluded.schema_version
 	`
@@ -406,7 +446,7 @@ func (s *Store) SavePreservingSchemaVersion(ctx context.Context, data *Data) err
 		data.ID, data.Name, data.CreatedAt, data.LastAccessAt, data.Status,
 		data.Network, data.HorizonURL, data.TxHash,
 		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr, data.PinnedEndpoint,
-		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ErstVersion, data.SchemaVersion,
+		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ProvenanceJSON, data.ErstVersion, data.SchemaVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
@@ -420,23 +460,38 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
-	       sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
+	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json, GLASSBOX_version, schema_version
 	FROM sessions
 	WHERE id = ?
 	`
 
 	var data Data
 	var createdAt, lastAccessAt string
-	var envFP sql.NullString
+	var envFP, auditHash, auditSignature, prevSessionHash, provenanceJSON, annotationsJSON sql.NullString
 	err := s.db.QueryRowContext(ctx, query, sessionID).Scan(
 		&data.ID, &data.Name, &createdAt, &lastAccessAt, &data.Status,
 		&data.Network, &data.HorizonURL, &data.TxHash,
 		&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
-		&data.AuditHash, &data.AuditSignature, &data.PreviousSessionHash,
-		&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &data.ErstVersion, &data.SchemaVersion,
+		&auditHash, &auditSignature, &prevSessionHash,
+		&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON, &data.ErstVersion, &data.SchemaVersion,
 	)
 	if envFP.Valid {
 		data.EnvFingerprint = envFP.String
+	}
+	if auditHash.Valid {
+		data.AuditHash = auditHash.String
+	}
+	if auditSignature.Valid {
+		data.AuditSignature = auditSignature.String
+	}
+	if prevSessionHash.Valid {
+		data.PreviousSessionHash = prevSessionHash.String
+	}
+	if provenanceJSON.Valid {
+		data.ProvenanceJSON = provenanceJSON.String
+	}
+	if annotationsJSON.Valid {
+		data.AnnotationsJSON = annotationsJSON.String
 	}
 
 	if err == sql.ErrNoRows {
@@ -452,6 +507,13 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 				"  Fix: the session database may be corrupt. Check ~/.Glassbox/sessions.db",
 			sessionID, err,
 		)
+	}
+
+	if data.CreatedAt, err = time.Parse(time.RFC3339, createdAt); err != nil {
+		return nil, fmt.Errorf("failed to parse created_at for session %q: %w", sessionID, err)
+	}
+	if data.LastAccessAt, err = time.Parse(time.RFC3339, lastAccessAt); err != nil {
+		return nil, fmt.Errorf("failed to parse last_access_at for session %q: %w", sessionID, err)
 	}
 
 	if schemaErr := ValidateSchemaVersion(data.SchemaVersion, data.ID); schemaErr != nil {
@@ -512,7 +574,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
-	       sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
+	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json, GLASSBOX_version, schema_version
 	FROM sessions
 	ORDER BY last_access_at DESC
 	`
