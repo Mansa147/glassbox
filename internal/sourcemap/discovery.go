@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dotandev/glassbox/internal/wasmvalidate"
 )
 
 const wasmTargetPath = "target/wasm32-unknown-unknown/release"
@@ -167,6 +169,17 @@ func DiscoverLocalSymbols(projectRoot string) (*DiscoveryResult, error) {
 						"  to ensure the file is a proper WASM binary.",
 					fullPath,
 				))
+			continue
+		}
+
+		// Structurally validate the module before indexing it. A file with a
+		// valid magic number but a corrupt or hostile section table would
+		// otherwise be hashed and offered as a resolution candidate, only to
+		// fail later — deeper in DWARF parsing — with a far less specific
+		// error.
+		if report := wasmvalidate.Validate(content, wasmvalidate.DefaultLimits()); !report.OK {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("%q failed WASM validation and was skipped: %v", fullPath, report.Error()))
 			continue
 		}
 
