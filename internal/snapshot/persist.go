@@ -155,6 +155,15 @@ func LoadPersisted(path string) (*PersistedSnapshot, error) {
 			path,
 		)
 	}
+	validNetworks := map[string]bool{"testnet": true, "mainnet": true, "futurenet": true}
+	if !validNetworks[ps.Metadata.Network] {
+		return nil, fmt.Errorf(
+			"snapshot file %s contains unknown network %q in metadata — "+
+				"must be one of: testnet, mainnet, futurenet; "+
+				"re-run the debug command with --network to regenerate the snapshot",
+			path, ps.Metadata.Network,
+		)
+	}
 	if ps.Snapshot == nil {
 		return nil, fmt.Errorf("snapshot file %s contains no ledger state", path)
 	}

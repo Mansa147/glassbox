@@ -564,12 +564,12 @@ func (s *Store) LoadByName(ctx context.Context, name string) (*Data, error) {
 	return s.Load(ctx, id)
 }
 
-// List returns recent sessions, ordered by last_access_at descending
+// List returns sessions ordered by last_access_at descending.
+//
+//   - limit > 0 : return at most that many sessions.
+//   - limit == 0: apply the default cap of 50 (suitable for interactive listing).
+//   - limit == -1: return every session with no cap (used by RunStoreDiagnostics).
 func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
 	queryBase := `
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
@@ -581,11 +581,15 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 
 	var rows *sql.Rows
 	var err error
-	if limit > 0 {
-		query := queryBase + "LIMIT ?"
-		rows, err = s.db.QueryContext(ctx, query, limit)
-	} else {
+	switch {
+	case limit == -1:
+		// Explicitly no limit — caller wants every row (e.g. RunStoreDiagnostics).
 		rows, err = s.db.QueryContext(ctx, queryBase)
+	case limit > 0:
+		rows, err = s.db.QueryContext(ctx, queryBase+"LIMIT ?", limit)
+	default:
+		// 0 or any other non-positive value → apply the interactive default.
+		rows, err = s.db.QueryContext(ctx, queryBase+"LIMIT ?", 50)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
@@ -1087,7 +1091,10 @@ type StoreDiagnosticsResult struct {
 // on each one. It is safe to call from a background goroutine.
 // If the store cannot be listed, an error is returned immediately.
 func (s *Store) RunStoreDiagnostics(ctx context.Context) (*StoreDiagnosticsResult, error) {
-	sessions, err := s.List(ctx, 0) // 0 → use default limit
+	// Use -1 to bypass the default limit of 50 and inspect every session in the
+	// store. Passing 0 would silently cap the scan at 50 rows, leaving degraded
+	// sessions undetected in larger stores.
+	sessions, err := s.List(ctx, -1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions for diagnostics: %w\n"+
 			"  Run 'glassbox session list' to verify the session database is accessible.", err)
