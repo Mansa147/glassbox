@@ -190,16 +190,3 @@ func DiscoverLocalSymbolsLegacy(projectRoot string) (map[string]string, error) {
 	}
 	return nil, err
 }
-
-// DiscoverLocalSymbolsLegacy is the legacy API that returns a plain map for
-// backwards compatibility with callers that have not yet migrated to
-// DiscoverLocalSymbols. New callers should prefer DiscoverLocalSymbols.
-//
-// Deprecated: Use DiscoverLocalSymbols which returns richer diagnostics.
-func DiscoverLocalSymbolsLegacy(projectRoot string) (map[string]string, error) {
-	result, err := DiscoverLocalSymbols(projectRoot)
-	if result != nil {
-		return result.Found, err
-	}
-	return nil, err
-}

@@ -180,28 +180,8 @@ func (s *Store) initSchema() error {
 	}
 	if err := s.ensureColumn("sessions", "previous_session_hash", "TEXT"); err != nil {
 		return err
+	}
 	return nil
-}
-
-// columnExists checks if a column exists in a table.
-func (s *Store) columnExists(table, column string) (bool, error) {
-	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect %s schema: %w", table, err)
-	}
-	if err := s.ensureColumn("sessions", "audit_hash", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("sessions", "audit_signature", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("sessions", "previous_session_hash", "TEXT"); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 func (s *Store) ensureColumn(table, column, definition string) error {
@@ -342,7 +322,7 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 		audit_hash, audit_signature, previous_session_hash,
 		sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		last_access_at = excluded.last_access_at,
@@ -478,7 +458,7 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 		return nil, schemaErr
 	}
 
-	upgraded, upgradeErr := UpgradeSessionData(data)
+	upgraded, upgradeErr := UpgradeSessionData(&data)
 	if upgradeErr != nil {
 		return nil, upgradeErr
 	}
@@ -486,7 +466,7 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	// Update last_access_at on load
 	data.LastAccessAt = time.Now()
 	if upgraded {
-		if saveErr := s.Save(ctx, data); saveErr != nil {
+		if saveErr := s.Save(ctx, &data); saveErr != nil {
 			return nil, fmt.Errorf("failed to persist upgraded session %q: %w", sessionID, saveErr)
 		}
 	} else {
@@ -496,7 +476,7 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 		}
 	}
 
-	return data, nil
+	return &data, nil
 }
 
 // LoadByName retrieves a saved session snapshot by its user-facing bookmark name.
@@ -556,16 +536,23 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 		var createdAt, lastAccessAt string
 
 		envFP := sql.NullString{}
+		auditHash := sql.NullString{}
+		auditSignature := sql.NullString{}
+		previousSessionHash := sql.NullString{}
 		scanErr := rows.Scan(
 			&data.ID, &data.Name, &createdAt, &lastAccessAt, &data.Status,
 			&data.Network, &data.HorizonURL, &data.TxHash,
 			&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
-			&data.AuditHash, &data.AuditSignature, &data.PreviousSessionHash,
+			&auditHash, &auditSignature, &previousSessionHash,
 			&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &data.ErstVersion, &data.SchemaVersion,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", scanErr)
 		}
+		data.AuditHash = auditHash.String
+		data.AuditSignature = auditSignature.String
+		data.PreviousSessionHash = previousSessionHash.String
+		data.EnvFingerprint = envFP.String
 		sessions = append(sessions, &data)
 	}
 
