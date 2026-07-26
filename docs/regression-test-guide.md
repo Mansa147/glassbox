@@ -282,6 +282,7 @@ When reviewing a PR that fixes a bug, verify:
 |------|---------|
 | `internal/cmd/regression_example_test.go` | Canonical template with one example per layer |
 | `internal/testhelpers/` | Fixture builder package |
+| `docs/printer-golden-tests.md` | Golden tests comparing trace printers across output modes |
 | `test/regression/FIXTURES.md` | Naming rules, stub values, secret avoidance |
 | `test/regression/fixtures/<layer>/README.md` | Layer-specific rules |
 | `scripts/check-readme-commands.sh` | Detects stale command references in README |

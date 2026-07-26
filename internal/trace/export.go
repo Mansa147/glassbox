@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -223,7 +224,10 @@ func ValidateTraceExportParams(trace *ExecutionTrace, format string, outputPath 
 			"  Default is html if not specified during export")
 	} else {
 		normalizedFormat := strings.ToLower(strings.TrimSpace(format))
-		validFormats := map[string]bool{"html": true, "markdown": true, "md": true, "json": true, "text": true}
+		validFormats := map[string]bool{"md": true}
+		for _, f := range SupportedExportFormats() {
+			validFormats[f] = true
+		}
 		if !validFormats[normalizedFormat] {
 			validationErrors = append(validationErrors, fmt.Sprintf(
 				"invalid or unsupported --export-format %q — must be one of: html, markdown, json, text\n"+
@@ -427,6 +431,17 @@ func ValidateTraceFormatCompatibility(trace *ExecutionTrace, format string) erro
 	return nil
 }
 
+// SupportedExportFormats returns the canonical list of trace export formats.
+// "md" is accepted as an alias for "markdown" but is not listed separately.
+//
+// Adding a format here requires wiring it into ExportExecutionTraceWithOptions,
+// ValidateTraceFormatCompatibility, and the printer golden tests
+// (internal/trace/printer_golden_test.go) — the golden coverage test fails
+// until every listed format has checked-in golden fixtures.
+func SupportedExportFormats() []string {
+	return []string{"html", "markdown", "json", "text"}
+}
+
 func ExportExecutionTrace(trace *ExecutionTrace, format string, outputPath string) error {
 	return ExportExecutionTraceWithOptions(trace, format, outputPath, ExportOptions{})
 }
@@ -483,7 +498,7 @@ func ExportExecutionTraceWithOptions(trace *ExecutionTrace, format string, outpu
 		}
 		content = string(jsonBytes)
 	case "text":
-		content, err = GenerateTracePlainText(trace)
+		content, err = GenerateTracePlainTextWithOptions(trace, opts)
 		if err != nil {
 			return fmt.Errorf("failed to generate plain text trace: %w", err)
 		}
@@ -579,15 +594,25 @@ func GenerateTraceMarkdownWithOptions(trace *ExecutionTrace, opts ExportOptions)
 
 // GenerateTracePlainText renders a shareable plain-text trace with indented hierarchy.
 func GenerateTracePlainText(trace *ExecutionTrace) (string, error) {
+	return GenerateTracePlainTextWithOptions(trace, ExportOptions{})
+}
+
+// GenerateTracePlainTextWithOptions renders a plain-text trace including any
+// comments and session metadata, matching the semantic coverage of the HTML
+// and Markdown exporters (previously the text format silently dropped
+// annotations).
+func GenerateTracePlainTextWithOptions(trace *ExecutionTrace, opts ExportOptions) (string, error) {
 	if trace == nil {
 		return "", fmt.Errorf("trace is nil")
 	}
+	annotations := mergeTraceAnnotations(trace.Annotations, opts)
 
 	data := exportData{
 		TransactionHash: trace.TransactionHash,
 		StartTime:       trace.StartTime.Format(time.RFC3339),
 		EndTime:         trace.EndTime.Format(time.RFC3339),
 		TotalSteps:      len(trace.States),
+		Annotations:     annotations,
 		States:          buildExportStates(trace),
 	}
 
@@ -598,6 +623,26 @@ func GenerateTracePlainText(trace *ExecutionTrace) (string, error) {
 	fmt.Fprintf(&buf, "Steps:       %d\n", data.TotalSteps)
 	fmt.Fprintf(&buf, "Started:     %s\n", data.StartTime)
 	fmt.Fprintf(&buf, "Ended:       %s\n\n", data.EndTime)
+
+	if len(data.Annotations.Comments) > 0 {
+		buf.WriteString("Comments:\n")
+		for _, c := range data.Annotations.Comments {
+			fmt.Fprintf(&buf, "  - %s\n", c)
+		}
+		buf.WriteString("\n")
+	}
+	if len(data.Annotations.SessionMetadata) > 0 {
+		keys := make([]string, 0, len(data.Annotations.SessionMetadata))
+		for k := range data.Annotations.SessionMetadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf.WriteString("Session metadata:\n")
+		for _, k := range keys {
+			fmt.Fprintf(&buf, "  - %s: %s\n", k, data.Annotations.SessionMetadata[k])
+		}
+		buf.WriteString("\n")
+	}
 
 	for _, s := range data.States {
 		fmt.Fprintf(&buf, "Step %d: %s\n", s.Step, s.Summary)
@@ -623,6 +668,12 @@ func GenerateTracePlainText(trace *ExecutionTrace) (string, error) {
 		}
 		if s.Error != "" {
 			fmt.Fprintf(&buf, "  Error:     %s\n", s.Error)
+		}
+		if s.CostSummary != "" {
+			fmt.Fprintf(&buf, "  Cost:      %s\n", s.CostSummary)
+		}
+		for _, line := range s.CostBreakdown {
+			fmt.Fprintf(&buf, "    * %s\n", line)
 		}
 		for _, detail := range s.Details {
 			fmt.Fprintf(&buf, "    - %s\n", detail)
@@ -668,6 +719,14 @@ func buildExportStates(trace *ExecutionTrace) []exportState {
 			details = append(details, fmt.Sprintf("cost: %s", FormatCostAnnotation(s.Cost)))
 		}
 
+		// A nil return value must render as "absent" in every format; formatting
+		// it with %v would leak a literal "<nil>" into Markdown and HTML output
+		// while the text exporter suppresses it.
+		returnStr := ""
+		if s.ReturnValue != nil {
+			returnStr = fmt.Sprintf("%v", s.ReturnValue)
+		}
+
 		summary := s.Operation
 		if summary == "" {
 			summary = s.EventType
@@ -688,7 +747,7 @@ func buildExportStates(trace *ExecutionTrace) []exportState {
 			Function:         s.Function,
 			ContractMetadata: s.ContractMetadata,
 			Args:             fmt.Sprintf("%v", s.Arguments),
-			Return:           fmt.Sprintf("%v", s.ReturnValue),
+			Return:           returnStr,
 			Error:            s.Error,
 			SourceFile:       s.SourceFile,
 			SourceLine:       s.SourceLine,
