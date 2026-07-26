@@ -86,6 +86,23 @@ const traceHTMLTemplate = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glassbox Trace Export</title>
   <style>
+    /* Issue #542: High-contrast support */
+    @media (prefers-contrast: high) {
+      body { background: #000 !important; color: #fff !important; }
+      details { border-color: #fff !important; background: #111 !important; }
+      .state-meta, .header p { color: #ccc !important; }
+      code { background: #222 !important; color: #fff !important; }
+      a { color: #66c !important; text-decoration: underline !important; }
+    }
+    /* Issue #542: Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    }
+    /* Issue #542: Focus indicators */
+    summary:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+    button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+    a:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+
     body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #0b1220; color: #e8eef9; }
     .header { border-bottom: 1px solid #334155; padding-bottom: 1rem; margin-bottom: 1rem; }
     .header h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
@@ -117,10 +134,11 @@ const traceHTMLTemplate = `<!doctype html>
   </style>
 </head>
 <body>
-  <div class="header">
+  <a href="#trace-content" class="sr-only" accesskey="s">Skip to trace content</a>
+  <div class="header" role="banner">
     <h1>Glassbox Trace Export</h1>
     <p>Transaction: {{ .TransactionHash }}</p>
-    <p>Steps: {{ .TotalSteps }} · Started: {{ .StartTime }} · Ended: {{ .EndTime }}</p>
+    <p>Steps: {{ .TotalSteps }} &middot; Started: {{ .StartTime }} &middot; Ended: {{ .EndTime }}</p>
     {{ if .Annotations.Comments }}
     <div class="field"><strong>Comments:</strong><ul>{{ range .Annotations.Comments }}<li>{{ . }}</li>{{ end }}</ul></div>
     {{ end }}
@@ -161,6 +179,8 @@ const traceHTMLTemplate = `<!doctype html>
       <button onclick="setAll(false)">Collapse all</button>
     </div>
   </div>
+  <main id="trace-content" role="main" aria-label="Execution trace steps">
+  <div role="tree" aria-label="Trace step tree">
   {{ range .States }}
   <details open>
     <summary>#{{ .Step }} · {{ .Summary }}{{ if .Comments }} · {{ len .Comments }} comment(s){{ end }}</summary>
@@ -171,11 +191,11 @@ const traceHTMLTemplate = `<!doctype html>
       {{ if .Contract }}<span><strong>Contract:</strong> {{ .Contract }}</span>{{ end }}
       {{ if .Function }}<span><strong>Function:</strong> {{ .Function }}</span>{{ end }}
       {{ if .SourceFile }}<span><strong>Source:</strong> {{ .SourceFile }}:{{ .SourceLine }}</span>{{ end }}
-      {{ if .GitHubLink }}<span><strong>Link:</strong> <a href="{{ .GitHubLink }}" target="_blank">View on GitHub</a></span>{{ end }}
+      {{ if .GitHubLink }}<span><strong>Link:</strong> <a href="{{ .GitHubLink }}" target="_blank" rel="noopener" aria-label="View source on GitHub">View on GitHub</a></span>{{ end }}
     </div>
     <div class="field"><strong>Arguments:</strong> <code>{{ .Args }}</code></div>
     {{ if .Return }}<div class="field"><strong>Return:</strong> <code>{{ .Return }}</code></div>{{ end }}
-    {{ if .Error }}<div class="field"><strong>Error:</strong> <code>{{ .Error }}</code></div>{{ end }}
+    {{ if .Error }}<div class="field status-error" role="alert"><strong>Error:</strong> <code>{{ .Error }}</code></div>{{ end }}
     {{ if .CostSummary }}<div class="field"><strong>Cost:</strong> <code>{{ .CostSummary }}</code></div>{{ end }}
     {{ if .CostBreakdown }}
     <div class="field"><strong>Cost breakdown:</strong>
@@ -207,10 +227,39 @@ const traceHTMLTemplate = `<!doctype html>
     {{ end }}
   </details>
   {{ end }}
+  </div>
+  </main>
   <script>
+    // Issue #542: Keyboard navigation + focus management
     function setAll(open) {
-      document.querySelectorAll('details').forEach(function(element) { element.open = open; });
+      document.querySelectorAll('details[role="treeitem"]').forEach(function(element) {
+        element.open = open;
+        element.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
     }
+    document.querySelectorAll('details[role="treeitem"]').forEach(function(el) {
+      el.addEventListener('toggle', function() {
+        el.setAttribute('aria-expanded', el.open ? 'true' : 'false');
+      });
+    });
+    var steps = document.querySelectorAll('details[role="treeitem"]');
+    var currentFocus = 0;
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        currentFocus = Math.min(currentFocus + 1, steps.length - 1);
+        steps[currentFocus].querySelector('summary').focus();
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        currentFocus = Math.max(currentFocus - 1, 0);
+        steps[currentFocus].querySelector('summary').focus();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        var el = steps[currentFocus];
+        el.open = !el.open;
+        el.setAttribute('aria-expanded', el.open ? 'true' : 'false');
+      }
+    });
   </script>
 </body>
 </html>`
