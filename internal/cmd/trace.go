@@ -20,25 +20,27 @@ import (
 )
 
 var (
-	traceFile            string
-	traceThemeFlag       string
-	tracePrint           bool
-	traceNoColor         bool
-	traceExportSVG       string
-	traceOutputJSON      string
-	traceExportPath      string
-	traceExportFormat    string
-	traceExportMarkdown  string
-	traceAnnotationsFlag string
-	traceGasModelPath    string
-	traceComments        []string
-	traceMetadata        []string
-	traceVerbosity       string
-	traceDryRunFlag      bool
-	traceShowTimingFlag  bool
-	traceTimingsFlag     bool // --timings: structured phase timing via diagnostics
-	traceForceFlag       bool
-	traceFormatAlias     string // --format is a user-friendly alias for --export-format
+	traceFile                  string
+	traceThemeFlag             string
+	tracePrint                 bool
+	traceNoColor               bool
+	traceExportSVG             string
+	traceOutputJSON            string
+	traceExportPath            string
+	traceExportFormat          string
+	traceExportMarkdown        string
+	traceAnnotationsFlag       string
+	traceAnnotationsExportPath string
+	traceAnnotationsStrict     bool
+	traceGasModelPath          string
+	traceComments              []string
+	traceMetadata              []string
+	traceVerbosity             string
+	traceDryRunFlag            bool
+	traceShowTimingFlag        bool
+	traceTimingsFlag           bool // --timings: structured phase timing via diagnostics
+	traceForceFlag             bool
+	traceFormatAlias           string // --format is a user-friendly alias for --export-format
 
 	// eventSchemas is optionally populated by other subsystems (e.g. schema
 	// loading) before the trace command runs. Nil is safe — PrintExecutionTrace
@@ -76,6 +78,14 @@ Export formats (--export / --format):
   json      — machine-readable JSON, best for CI/CD and automated processing
   text      — plain text, best for simple logging or piping
 
+Reviewer comments:
+  Use --annotations to import a JSON file of reviewer comments and
+  --export-annotations to write them back out. Comments carry an author,
+  severity, and resolution state, and are anchored to a stable step ID or a
+  source location, so exports show each comment next to the step it is about.
+  Comments whose target is missing from the trace are reported as dangling and
+  still exported — add --annotations-strict to make that a hard failure.
+
 Performance notes:
   Large traces (>5 000 steps) can produce slow HTML rendering.
   Use --format json for large traces or CI pipelines.
@@ -111,6 +121,15 @@ Performance notes:
   # Export with comments and session metadata
   glassbox trace --export report.md --format markdown \
     --comment "Reviewed with Alice" --meta env=testnet execution.json
+
+  # Import reviewer comments and render them next to the steps they target
+  glassbox trace --annotations review.json --export report.md --format markdown execution.json
+
+  # Export reviewer comments to a portable file to hand to another reviewer
+  glassbox trace --export-annotations review.json execution.json
+
+  # Fail the run if any imported comment targets a step that is not in the trace
+  glassbox trace --annotations review.json --annotations-strict execution.json
 
   # Force overwrite of an existing output file
   glassbox trace --export trace.html --force execution.json`,
@@ -193,14 +212,31 @@ Performance notes:
 			}
 		}
 
-		// Validate --annotations file exists when set.
-		// NOTE: annotation loading (LoadAnnotationFile / BuildTraceNodeTree)
-		// is not yet implemented. The flag is accepted and validated for path
-		// correctness so the UI is consistent, but the overlay is skipped at
-		// runtime with a warning until the helper functions are available.
+		// Validate --annotations file exists when set. The file's contents are
+		// parsed and validated at run time by trace.LoadAnnotationFile; this
+		// pre-flight check only confirms the path is usable so a typo is
+		// reported alongside every other flag error in a single pass.
 		if traceAnnotationsFlag != "" {
 			if _, err := ValidateInputPath("annotations", traceAnnotationsFlag); err != nil {
 				failures = append(failures, err.Error())
+			}
+		}
+
+		// --annotations-strict only means something when annotations are
+		// actually being resolved against a trace.
+		if traceAnnotationsStrict && traceAnnotationsFlag == "" && traceAnnotationsExportPath == "" {
+			failures = append(failures,
+				"--annotations-strict requires --annotations or --export-annotations\n"+
+					"  Fix: add --annotations <file> to import comments, or drop --annotations-strict")
+		}
+
+		// --export-annotations must name a file, not a directory.
+		if traceAnnotationsExportPath != "" {
+			if strings.HasSuffix(traceAnnotationsExportPath, "/") || strings.HasSuffix(traceAnnotationsExportPath, "\\") {
+				failures = append(failures, fmt.Sprintf(
+					"--export-annotations %q looks like a directory path; provide a full file path\n"+
+						"  Fix: specify a filename (e.g. --export-annotations ./review.json)",
+					traceAnnotationsExportPath))
 			}
 		}
 
@@ -370,6 +406,74 @@ Performance notes:
 			}
 		}
 
+		// --annotations: import reviewer comments from a portable annotation
+		// file. This happens before the verbosity filter runs so targets are
+		// resolved against the trace at full fidelity; a later filter that
+		// breaks an anchor is reported, not silently applied.
+		if traceAnnotationsFlag != "" {
+			file, loadErr := trace.LoadAnnotationFile(traceAnnotationsFlag)
+			if loadErr != nil {
+				return errors.WrapValidationError(loadErr.Error())
+			}
+			report, attachErr := executionTrace.AttachReviewerComments(file.Comments)
+			if attachErr != nil {
+				return errors.WrapValidationError(attachErr.Error())
+			}
+			// Dangling references are reported but never cause valid comments
+			// to be dropped; --annotations-strict turns them into an error for
+			// callers that want a hard gate (e.g. CI).
+			for _, w := range report.Warnings() {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
+			}
+			if traceAnnotationsStrict && report.HasDangling() {
+				return errors.WrapValidationError(fmt.Sprintf(
+					"%d of %d imported annotation(s) have targets that do not resolve against this trace\n"+
+						"  Fix: re-export the annotations against this trace, or drop --annotations-strict "+
+						"to import them anyway",
+					len(report.Dangling), len(file.Comments)))
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "Imported %d annotation(s) from %s (%d resolved, %d dangling)\n",
+				len(file.Comments), traceAnnotationsFlag, len(report.Resolved), len(report.Dangling))
+		}
+
+		// --export-annotations: write the trace's reviewer comments to a
+		// portable file. Exporting what was just imported is a byte-stable
+		// round trip, which is what makes annotations shareable between
+		// reviewers.
+		if traceAnnotationsExportPath != "" && !traceDryRunFlag {
+			file, exportErr := trace.ExportAnnotationFile(executionTrace, time.Now())
+			if exportErr != nil {
+				return errors.WrapValidationError(exportErr.Error())
+			}
+			if !traceForceFlag {
+				if _, statErr := os.Stat(traceAnnotationsExportPath); statErr == nil {
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"Warning: %q already exists and will be overwritten. Use --force to suppress this warning.\n",
+						traceAnnotationsExportPath)
+				}
+			}
+			if saveErr := file.Save(traceAnnotationsExportPath); saveErr != nil {
+				removeIfCancelled(ctx, traceAnnotationsExportPath)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
+				return errors.WrapValidationError(saveErr.Error())
+			}
+			fmt.Printf("%s Annotations exported to: %s (%d comment(s))\n",
+				visualizer.Symbol("success"), traceAnnotationsExportPath, len(file.Comments))
+
+			// Every other export flag in this command writes its file and
+			// exits. Composing --export-annotations with a report export is
+			// useful, so only exit when nothing else was asked for — otherwise
+			// exporting annotations alone would drop into the interactive
+			// viewer, which no other export flag does.
+			if traceExportPath == "" && traceExportMarkdown == "" && traceExportSVG == "" &&
+				traceOutputJSON == "" && !tracePrint {
+				printTimings(cmd, diagCollector, traceTimingsFlag)
+				return nil
+			}
+		}
+
 		// --dry-run: validate parameters and compatibility but write nothing.
 		if traceDryRunFlag {
 			issues := trace.ValidateExecutionTrace(executionTrace)
@@ -445,16 +549,6 @@ Performance notes:
 
 		// --print: render a rich ASCII tree report then exit (non-interactive).
 		if tracePrint {
-			if traceAnnotationsFlag != "" {
-				// Annotation overlay for printed tree output requires LoadAnnotationFile
-				// and BuildTraceNodeTree — these are registered on the --annotations
-				// flag but the underlying helpers are not yet available in this build.
-				// Warn the user rather than silently ignoring the flag.
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"Warning: --annotations is registered but the annotation loader is not yet implemented in this build; the flag will be ignored.\n"+
-						"  The trace will be printed without annotation overlay.\n",
-				)
-			}
 			var printStart time.Time
 			if traceShowTimingFlag {
 				printStart = time.Now()
@@ -616,7 +710,9 @@ func init() {
 	traceCmd.Flags().StringVar(&traceExportFormat, "export-format", "html", "Trace export format: html, markdown, json, or text (use --format as an alias)")
 	traceCmd.Flags().StringVar(&traceFormatAlias, "format", "", "Export format alias for --export-format: html, markdown, json, or text")
 	traceCmd.Flags().StringVar(&traceExportMarkdown, "export-markdown", "", "Export trace as Markdown to specified file (deprecated: use --export --format markdown)")
-	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Path to a JSON file containing step annotations to overlay on the trace")
+	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Import reviewer comments from a JSON annotation file and attach them to the trace")
+	traceCmd.Flags().StringVar(&traceAnnotationsExportPath, "export-annotations", "", "Export the trace's reviewer comments to a portable JSON annotation file")
+	traceCmd.Flags().BoolVar(&traceAnnotationsStrict, "annotations-strict", false, "Fail if any imported annotation targets a step or source location missing from the trace")
 	traceCmd.Flags().StringVar(&traceGasModelPath, "gas-model", "", "Gas model JSON used to annotate contract call cost estimates")
 	traceCmd.Flags().StringVar(&traceVerbosity, "trace-verbosity", "normal", "Trace detail level: summary, normal, or verbose")
 	traceCmd.Flags().StringArrayVar(&traceComments, "comment", nil, "Comment to include in exported trace artifacts; repeatable")

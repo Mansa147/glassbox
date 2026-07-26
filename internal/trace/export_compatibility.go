@@ -325,7 +325,10 @@ func migrateTrace(trace *ExecutionTrace, fromVersion, toVersion TraceFormatVersi
 		return nil, fmt.Errorf("cannot migrate nil trace")
 	}
 	
-	// Create a copy to avoid modifying original
+	// Create a copy to avoid modifying original. Annotations are deep-copied
+	// because they hold slices and a map — a shallow copy would leave the
+	// migrated trace sharing reviewer comments with the original, so editing
+	// one would silently edit the other.
 	migrated := &ExecutionTrace{
 		TransactionHash:  trace.TransactionHash,
 		StartTime:        trace.StartTime,
@@ -333,7 +336,7 @@ func migrateTrace(trace *ExecutionTrace, fromVersion, toVersion TraceFormatVersi
 		States:           make([]ExecutionState, len(trace.States)),
 		Snapshots:        trace.Snapshots,
 		DiagnosticEvents: trace.DiagnosticEvents,
-		Annotations:      trace.Annotations,
+		Annotations:      trace.Annotations.Clone(),
 		CurrentStep:      trace.CurrentStep,
 		SnapshotInterval: trace.SnapshotInterval,
 	}
@@ -459,11 +462,18 @@ func ValidateFormatCompatibility(trace *ExecutionTrace, format string, compatOpt
 		}
 	}
 	
+	// Surface reviewer comments whose targets no longer resolve. The comments
+	// are still exported — this only tells the operator that an anchor broke,
+	// typically because the trace was filtered or migrated since the review.
+	for _, w := range trace.AnnotationRefReport().Warnings() {
+		warnings = append(warnings, "Dangling annotation: "+w)
+	}
+
 	// Check for lossy conversions if downgrading
 	if compatOpts.AllowDowngrade {
 		warnings = append(warnings, "Downgrading to older format version may lose new features or fields")
 	}
-	
+
 	return warnings
 }
 

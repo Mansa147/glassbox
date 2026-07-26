@@ -41,10 +41,17 @@ type CostAnnotation struct {
 
 // TraceAnnotations carries collaboration metadata that should travel with
 // exported trace artifacts.
+//
+// Comments holds free-form notes that apply to the export as a whole and have
+// no target, author, or resolution state. ReviewerComments holds the durable,
+// targeted review model (see reviewer_comments.go); new collaboration features
+// should use it. Both are preserved on export so traces annotated by older
+// builds keep round-tripping unchanged.
 type TraceAnnotations struct {
-	Comments        []string          `json:"comments,omitempty"`
-	SessionMetadata map[string]string `json:"session_metadata,omitempty"`
-	GeneratedAt     time.Time         `json:"generated_at,omitempty"`
+	Comments         []string          `json:"comments,omitempty"`
+	ReviewerComments []ReviewerComment `json:"reviewer_comments,omitempty"`
+	SessionMetadata  map[string]string `json:"session_metadata,omitempty"`
+	GeneratedAt      time.Time         `json:"generated_at,omitempty"`
 }
 
 // AnnotateExecutionCosts attaches cost annotations to contract execution states.
