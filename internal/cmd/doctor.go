@@ -96,7 +96,13 @@ This command verifies:
   - Reachability of the configured RPC endpoint
   - Deep link registration (glassbox:// URL scheme)
 
-Use this to troubleshoot installation issues or verify your setup.`,
+Use this to troubleshoot installation issues or verify your setup.
+
+The --bundle flag generates a portable, redacted diagnostics archive that
+contains version metadata, platform details, configuration shape, dependency
+check results, and protocol registration state.  The archive never contains
+private keys, tokens, or raw secret material — all sensitive values are
+replaced with "[REDACTED]".  Share it with maintainers for offline support.`,
 	Example: `  # Check environment status
   Glassbox doctor
 
@@ -107,7 +113,13 @@ Use this to troubleshoot installation issues or verify your setup.`,
   Glassbox doctor --fix
 
   # Fix without prompts (CI mode)
-  Glassbox doctor --fix --yes`,
+  Glassbox doctor --fix --yes
+
+  # Generate a redacted diagnostics archive
+  Glassbox doctor --bundle
+
+  # Generate bundle at a specific path
+  Glassbox doctor --bundle --bundle-output ./glassbox-diag.gbdiag`,
 	Args: cobra.NoArgs,
 	RunE: runDoctor,
 }
@@ -116,6 +128,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	fix, _ := cmd.Flags().GetBool("fix")
 	yes, _ := cmd.Flags().GetBool("yes")
+	bundle, _ := cmd.Flags().GetBool("bundle")
+	bundleOutput, _ := cmd.Flags().GetString("bundle-output")
 
 	fmt.Println("Glassbox Environment Diagnostics")
 	fmt.Println("=============================")
@@ -167,13 +181,24 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 
+	// --bundle: generate a redacted diagnostics archive and print its path.
+	// This runs independently of --fix; both flags may be combined.
+	if bundle {
+		archivePath, err := runDoctorBundle(dependencies, bundleOutput)
+		if err != nil {
+			return fmt.Errorf("diagnostics bundle: %w", err)
+		}
+		fmt.Printf("\nDiagnostics archive written to: %s\n", archivePath)
+		fmt.Println("Share this file with the maintainers — it contains no private keys or tokens.")
+	}
+
 	// Summary
 	if allOK {
 		fmt.Println("\033[32m[OK] All dependencies are installed and ready!\033[0m")
 		return nil
 	}
 
-	// NEW: Handle --fix mode
+	// Handle --fix mode
 	if fix {
 		fmt.Printf("\n\033[36m[FIX MODE]\033[0m Attempting to fix %d issue(s)\n", fixableCount)
 		if yes {
@@ -703,4 +728,8 @@ func init() {
 	doctorCmd.Flags().BoolP("verbose", "v", false, "Show detailed diagnostic information")
 	doctorCmd.Flags().BoolP("fix", "f", false, "Attempt to fix detected issues")
 	doctorCmd.Flags().Bool("yes", false, "Skip confirmation prompts (use with --fix)")
+	doctorCmd.Flags().Bool("bundle", false,
+		"Generate a redacted diagnostics archive and print its path (no upload)")
+	doctorCmd.Flags().String("bundle-output", "",
+		"Destination path for the diagnostics archive (default: auto-generated in OS temp dir)")
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/dotandev/glassbox/internal/perfmetrics"
 	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/profile"
+	"github.com/dotandev/glassbox/internal/progress"
 	"github.com/dotandev/glassbox/internal/replay"
 	"github.com/dotandev/glassbox/internal/rpc"
 	"github.com/dotandev/glassbox/internal/security"
@@ -659,6 +660,11 @@ Local WASM Replay Mode:
 			diagCollector = diagnostics.Noop()
 		}
 
+		// Build progress sink — NopSink unless --progress-json is active.
+		progSink := buildDebugSink()
+		progEm := progress.NewEmitter(progSink)
+		progEm.Start(progress.PhaseInit, "debug command starting")
+
 		if verbose {
 			logger.SetLevel(slog.LevelInfo)
 		} else {
@@ -668,6 +674,7 @@ Local WASM Replay Mode:
 		// Dry-run: validate inputs and environment without executing replay
 		if debugDryRunFlag {
 			if demoMode || wasmPath != "" || loadSnapshotsFlag != "" || xdrFileFlag != "" || jsonFileFlag != "" {
+				progEm.Error(progress.PhaseInit, "--dry-run combined with incompatible flag", "invalid_dry_run_flags")
 				return errors.WrapValidationError(
 					"--dry-run cannot be combined with --demo, --wasm, --load-snapshots, or local envelope input; " +
 						"--dry-run only validates the network transaction path")
@@ -823,6 +830,8 @@ Local WASM Replay Mode:
 			}
 			defer cleanup()
 		}
+
+		progEm.Complete(progress.PhaseInit, "initialization complete")
 
 		// Start root span
 		tracer := telemetry.GetTracer()
