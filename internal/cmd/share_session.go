@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,13 @@ Validation:
 		ctx := cmd.Context()
 
 		outputFlag, _ := cmd.Flags().GetString("output")
+		redactFlag, _ := cmd.Flags().GetString("redact")
+		previewFlag, _ := cmd.Flags().GetBool("preview")
+
+		profile, err := session.ParseRedactionProfile(redactFlag)
+		if err != nil {
+			return errors.WrapValidationError(err.Error())
+		}
 
 		var data *session.Data
 
@@ -53,7 +61,7 @@ Validation:
 			}
 		} else {
 			// Load a saved session by ID.
-			store, err := session.NewStore()
+			store, err := openSessionStore()
 			if err != nil {
 				return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 			}
@@ -79,7 +87,20 @@ Validation:
 			}
 		}
 
-		if err := session.ExportArchive(data, dest); err != nil {
+		redacted, report, err := session.RedactSession(data, profile)
+		if err != nil {
+			return fmt.Errorf("failed to apply redaction profile: %w", err)
+		}
+
+		if previewFlag {
+			printRedactionReport(cmd.OutOrStdout(), report)
+			return nil
+		}
+		if report.Profile != session.RedactionFull {
+			printRedactionReport(cmd.OutOrStdout(), report)
+		}
+
+		if err := session.ExportArchive(redacted, dest); err != nil {
 			return fmt.Errorf("failed to export session archive: %w", err)
 		}
 
@@ -93,6 +114,7 @@ Validation:
 		fmt.Printf("  Session ID:  %s\n", data.ID)
 		fmt.Printf("  Transaction: %s\n", data.TxHash)
 		fmt.Printf("  Network:     %s\n", data.Network)
+		fmt.Printf("  Redaction:   %s\n", report.Profile)
 		fmt.Printf("  Archive:     %s (%d bytes)\n", dest, size)
 		fmt.Printf("\nTo load on another machine:\n")
 		fmt.Printf("  Glassbox session load %s\n", dest)
@@ -167,8 +189,34 @@ the archive are available immediately without re-fetching from the network.`,
 	},
 }
 
+// printRedactionReport renders a RedactionReport as a preview the operator
+// can review before an archive is written — or, when redaction was applied
+// silently to a real export, as a record of what changed.
+func printRedactionReport(w io.Writer, report *session.RedactionReport) {
+	fmt.Fprintf(w, "Redaction profile: %s\n", report.Profile)
+	for _, f := range report.Fields {
+		status := "kept"
+		switch f.Policy {
+		case session.PolicyRedact:
+			status = "removed"
+		case session.PolicyPseudonymize:
+			status = "pseudonymized"
+		}
+		if !f.Applied {
+			fmt.Fprintf(w, "  - %-22s %s (nothing to change)\n", f.Field, status)
+			continue
+		}
+		fmt.Fprintf(w, "  - %-22s %s: %s\n", f.Field, status, f.Sample)
+	}
+	if report.IdentifiersPseudonymized > 0 {
+		fmt.Fprintf(w, "%d unique identifier(s) pseudonymized.\n", report.IdentifiersPseudonymized)
+	}
+}
+
 func init() {
 	sessionShareCmd.Flags().StringP("output", "o", "", "Output archive path (default: auto-generated .gbx file)")
+	sessionShareCmd.Flags().String("redact", "full", "Redaction profile applied before export: strict, balanced, or full (default: full, unredacted)")
+	sessionShareCmd.Flags().Bool("preview", false, "Show what --redact would remove without writing an archive")
 
 	sessionCmd.AddCommand(sessionShareCmd)
 	sessionCmd.AddCommand(sessionLoadCmd)

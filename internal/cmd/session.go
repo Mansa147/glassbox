@@ -6,6 +6,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +22,54 @@ var (
 	sessionNameFlag        string
 	sessionPinEndpointFlag string
 	sessionSavePlanFlag    bool // --plan: show execution plan without saving
+
+	// Session encryption [Issue #560]. Persistent flags on sessionCmd so
+	// every subcommand that opens the store (save, load, list, doctor,
+	// import, share, gc) shares one configuration.
+	sessionEncryptFlag       bool
+	sessionKeyProviderFlag   string
+	sessionKeyPassphraseFlag string
 )
+
+// openSessionStore opens the session store at the default location and, if
+// session encryption was requested via flags or environment, configures its
+// key provider. Every CLI command that touches the session store should use
+// this instead of calling session.NewStore() directly, so encryption
+// configuration is applied consistently everywhere.
+func openSessionStore() (*session.Store, error) {
+	store, err := session.NewStore()
+	if err != nil {
+		return nil, err
+	}
+	if kp, kpErr := resolveSessionKeyProviderFromFlags(); kpErr != nil {
+		store.Close()
+		return nil, kpErr
+	} else if kp != nil {
+		store.SetKeyProvider(kp)
+	}
+	return store, nil
+}
+
+// resolveSessionKeyProviderFromFlags builds a session.KeyProvider from CLI
+// flags and their environment-variable fallbacks. It returns (nil, nil) when
+// encryption was not requested, so callers can tell "not configured" apart
+// from "configured but invalid."
+func resolveSessionKeyProviderFromFlags() (session.KeyProvider, error) {
+	encrypt := sessionEncryptFlag || os.Getenv("GLASSBOX_SESSION_ENCRYPTION") != ""
+	providerName := sessionKeyProviderFlag
+	if providerName == "" {
+		providerName = os.Getenv("GLASSBOX_SESSION_KEY_PROVIDER")
+	}
+	passphrase := sessionKeyPassphraseFlag
+	if passphrase == "" {
+		passphrase = os.Getenv("GLASSBOX_SESSION_KEY_PASSPHRASE")
+	}
+
+	if !encrypt && providerName == "" && passphrase == "" {
+		return nil, nil
+	}
+	return session.ResolveKeyProvider(providerName, passphrase)
+}
 
 // currentData holds the active session context from debug command
 var currentData *session.Data
@@ -162,7 +210,7 @@ Validation:
 		}
 
 		// Open session store
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 		}
@@ -237,7 +285,7 @@ Use 'Glassbox session list' to see available session IDs and names.`,
 		}
 
 		// Open session store
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to open session store: %v\n"+
@@ -372,7 +420,7 @@ See also:
 		ctx := cmd.Context()
 
 		// Open session store
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 		}
@@ -446,7 +494,7 @@ Use 'Glassbox session list' to see available sessions.`,
 		}
 
 		// Open session store
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 		}
@@ -553,7 +601,7 @@ Validation:
 		fmt.Println()
 
 		// Attempt to load the session from the store.
-		store, storeErr := session.NewStore()
+		store, storeErr := openSessionStore()
 		if storeErr != nil {
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to open session store: %v\n"+
@@ -641,7 +689,7 @@ with actionable remediation hints for each degraded session.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to open session store: %v\n"+
@@ -655,6 +703,19 @@ with actionable remediation hints for each degraded session.`,
 		}
 
 		fmt.Println(result.Summary())
+
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			glassboxDir := filepath.Join(home, ".Glassbox")
+			removed, cleanErr := session.CleanStaleTempFiles(glassboxDir, session.StaleTempFileAge)
+			if cleanErr == nil && removed > 0 {
+				fmt.Printf("Removed %d stale temp/recovery-journal file(s) from %s\n", removed, glassboxDir)
+			}
+			viewerDir := filepath.Join(glassboxDir, "viewer_state")
+			if removedVS, vsErr := session.CleanStaleTempFiles(viewerDir, session.StaleTempFileAge); vsErr == nil && removedVS > 0 {
+				fmt.Printf("Removed %d stale temp file(s) from %s\n", removedVS, viewerDir)
+			}
+		}
+
 		if result.DegradedSessions == 0 {
 			return nil
 		}
@@ -683,6 +744,14 @@ func init() {
 	sessionSaveCmd.Flags().StringVar(&sessionNameFlag, "name", "", "Bookmark name for this session snapshot")
 	sessionSaveCmd.Flags().StringVar(&sessionPinEndpointFlag, "pin-endpoint", "", "Pin an RPC endpoint URL with this session")
 	sessionSaveCmd.Flags().BoolVar(&sessionSavePlanFlag, "plan", false, "Print the execution plan (DB path, session ID) without saving")
+
+	sessionCmd.PersistentFlags().BoolVar(&sessionEncryptFlag, "session-encrypt", false,
+		"Encrypt sensitive session fields at rest (or set GLASSBOX_SESSION_ENCRYPTION)")
+	sessionCmd.PersistentFlags().StringVar(&sessionKeyProviderFlag, "session-key-provider", "",
+		"Session encryption key provider: passphrase (default) or env (or set GLASSBOX_SESSION_KEY_PROVIDER)")
+	sessionCmd.PersistentFlags().StringVar(&sessionKeyPassphraseFlag, "session-key-passphrase", "",
+		"Passphrase for session encryption (or set GLASSBOX_SESSION_KEY_PASSPHRASE)")
+	_ = sessionCmd.PersistentFlags().MarkHidden("session-key-passphrase") // sensitive; hidden from default help
 
 	sessionCmd.AddCommand(sessionSaveCmd)
 	sessionCmd.AddCommand(sessionResumeCmd)

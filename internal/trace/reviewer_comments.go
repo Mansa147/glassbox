@@ -619,6 +619,10 @@ type AnnotationFile struct {
 	GeneratedAt     time.Time         `json:"generated_at"`
 	TransactionHash string            `json:"transaction_hash,omitempty"`
 	Comments        []ReviewerComment `json:"comments"`
+	// Bookmarks are step-anchored bookmarks exchanged alongside comments
+	// [Issue #562]. Omitted from the bare-array file shape; a file written
+	// before bookmarks existed simply has none.
+	Bookmarks []Bookmark `json:"bookmarks,omitempty"`
 }
 
 // LoadAnnotationFile reads a portable annotation file from path.
@@ -749,6 +753,7 @@ func ExportAnnotationFile(t *ExecutionTrace, generatedAt time.Time) (*Annotation
 		GeneratedAt:     generatedAt.UTC().Truncate(time.Second),
 		TransactionHash: fingerprintTxHash(t.TransactionHash),
 		Comments:        comments,
+		Bookmarks:       append([]Bookmark(nil), t.Annotations.Bookmarks...),
 	}, nil
 }
 

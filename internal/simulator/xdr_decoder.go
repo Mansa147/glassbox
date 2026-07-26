@@ -67,11 +67,14 @@ func DecodeEnvelopeXDR(xdrB64 string) (*DecodedSimEnvelope, error) {
 
 	switch env.Type {
 	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
-		return decodeV0Envelope(env.MustV0())
+		v0 := env.MustV0()
+		return decodeV0Envelope(&v0)
 	case xdr.EnvelopeTypeEnvelopeTypeTx:
-		return decodeV1Envelope(env.MustV1())
+		v1 := env.MustV1()
+		return decodeV1Envelope(&v1)
 	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
-		return decodeFeeBumpEnvelope(env.MustFeeBump())
+		fb := env.MustFeeBump()
+		return decodeFeeBumpEnvelope(&fb)
 	default:
 		return nil, fmt.Errorf("%w: %q — only TransactionV0, TransactionV1, and FeeBumpTransaction are supported",
 			ErrUnsupportedVariant, env.Type)
@@ -142,7 +145,8 @@ func decodeFeeBumpEnvelope(fb *xdr.FeeBumpTransactionEnvelope) (*DecodedSimEnvel
 func decodeFeeBumpInner(inner xdr.FeeBumpTransactionInnerTx) (*DecodedSimEnvelope, error) {
 	switch inner.Type {
 	case xdr.EnvelopeTypeEnvelopeTypeTx:
-		return decodeV1Envelope(inner.MustV1())
+		v1 := inner.MustV1()
+		return decodeV1Envelope(&v1)
 	default:
 		return nil, fmt.Errorf("%w: inner transaction type %q", ErrUnsupportedVariant, inner.Type)
 	}

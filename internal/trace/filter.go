@@ -30,12 +30,15 @@ type FilterExpression struct {
 	FunctionRe   *regexp.Regexp `json:"-"`
 }
 
-// Severity levels for filtering.
+// Filter severity levels. Named distinctly from AnnotationSeverity
+// (reviewer_comments.go) since the two are unrelated concepts that happen to
+// share level names — this one grades trace step filtering, that one grades
+// reviewer comments.
 const (
-	SeverityError   = "error"
-	SeverityWarning = "warning"
-	SeverityInfo    = "info"
-	SeverityAll     = "all"
+	FilterSeverityError   = "error"
+	FilterSeverityWarning = "warning"
+	FilterSeverityInfo    = "info"
+	FilterSeverityAll     = "all"
 )
 
 // Validate checks that the filter expression is well-formed.
@@ -46,10 +49,10 @@ func (f *FilterExpression) Validate() error {
 	}
 
 	// Validate severity
-	if f.Severity != "" && f.Severity != SeverityError &&
-		f.Severity != SeverityWarning && f.Severity != SeverityInfo && f.Severity != SeverityAll {
+	if f.Severity != "" && f.Severity != FilterSeverityError &&
+		f.Severity != FilterSeverityWarning && f.Severity != FilterSeverityInfo && f.Severity != FilterSeverityAll {
 		return fmt.Errorf("invalid severity %q: must be one of %s, %s, %s, %s, %s",
-			f.Severity, SeverityError, SeverityWarning, SeverityInfo, SeverityAll, "")
+			f.Severity, FilterSeverityError, FilterSeverityWarning, FilterSeverityInfo, FilterSeverityAll, "")
 	}
 
 	// Validate event type
@@ -130,14 +133,14 @@ func (f *FilterExpression) Matches(state *ExecutionState) bool {
 	}
 
 	// Severity filter
-	if f.Severity != "" && f.Severity != SeverityAll {
+	if f.Severity != "" && f.Severity != FilterSeverityAll {
 		hasError := state.Error != ""
 		switch f.Severity {
-		case SeverityError:
+		case FilterSeverityError:
 			if !hasError {
 				return false
 			}
-		case SeverityInfo:
+		case FilterSeverityInfo:
 			if hasError {
 				return false
 			}

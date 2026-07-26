@@ -114,10 +114,10 @@ func compareFields(old, new *ExecutionState) []DiffField {
 		})
 	}
 	if old.Cost != nil && new.Cost != nil {
-		if old.Cost.CPUInstructions != new.Cost.CPUInstructions {
+		if old.Cost.CPU != new.Cost.CPU {
 			diffs = append(diffs, DiffField{"gas_cpu",
-				fmt.Sprintf("%d", old.Cost.CPUInstructions),
-				fmt.Sprintf("%d", new.Cost.CPUInstructions)})
+				fmt.Sprintf("%d", old.Cost.CPU),
+				fmt.Sprintf("%d", new.Cost.CPU)})
 		}
 		if old.Cost.MemoryBytes != new.Cost.MemoryBytes {
 			diffs = append(diffs, DiffField{"gas_mem",
@@ -339,11 +339,4 @@ func (d *TraceDiff) RenderHTML() (string, error) {
 		return "", fmt.Errorf("execute diff template: %w", err)
 	}
 	return sb.String(), nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

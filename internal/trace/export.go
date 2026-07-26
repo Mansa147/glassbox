@@ -782,14 +782,17 @@ func GenerateTracePlainTextWithOptions(trace *ExecutionTrace, opts ExportOptions
 		return "", fmt.Errorf("trace is nil")
 	}
 	annotations := mergeTraceAnnotations(trace.Annotations, opts)
+	byStep, traceLevel, dangling := buildExportComments(trace, annotations)
 
 	data := exportData{
-		TransactionHash: trace.TransactionHash,
-		StartTime:       trace.StartTime.Format(time.RFC3339),
-		EndTime:         trace.EndTime.Format(time.RFC3339),
-		TotalSteps:      len(trace.States),
-		Annotations:     annotations,
-		States:          buildExportStates(trace),
+		TransactionHash:  trace.TransactionHash,
+		StartTime:        trace.StartTime.Format(time.RFC3339),
+		EndTime:          trace.EndTime.Format(time.RFC3339),
+		TotalSteps:       len(trace.States),
+		Annotations:      annotations,
+		States:           buildExportStates(trace, byStep),
+		TraceComments:    traceLevel,
+		DanglingComments: dangling,
 	}
 
 	var buf strings.Builder
@@ -860,6 +863,23 @@ func GenerateTracePlainTextWithOptions(trace *ExecutionTrace, opts ExportOptions
 			for _, c := range s.Comments {
 				writePlainTextComment(&buf, "    ", c)
 			}
+		}
+		buf.WriteString("\n")
+	}
+
+	if len(data.TraceComments) > 0 {
+		buf.WriteString("Reviewer comments (whole trace):\n")
+		for _, c := range data.TraceComments {
+			writePlainTextComment(&buf, "  ", c)
+		}
+		buf.WriteString("\n")
+	}
+
+	if len(data.DanglingComments) > 0 {
+		buf.WriteString("Reviewer comments with unresolved targets:\n")
+		for _, c := range data.DanglingComments {
+			writePlainTextComment(&buf, "  ", c)
+			fmt.Fprintf(&buf, "    Target not found in this trace: %s\n", c.DanglingReason)
 		}
 		buf.WriteString("\n")
 	}

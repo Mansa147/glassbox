@@ -4,7 +4,6 @@
 package trace
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,8 +14,8 @@ import (
 // ── Issue #541: Trace diff tests ──────────────────────────────────────────────
 
 func TestTraceDiff_EquivalentTraces(t *testing.T) {
-	old := makeTrace("tx1", 5)
-	new := makeTrace("tx1", 5)
+	old := makeTraceN("tx1", 5)
+	new := makeTraceN("tx1", 5)
 
 	diff := ComputeTraceDiff(old, new)
 	if !diff.IsEmpty {
@@ -25,8 +24,8 @@ func TestTraceDiff_EquivalentTraces(t *testing.T) {
 }
 
 func TestTraceDiff_InsertedStep(t *testing.T) {
-	old := makeTrace("tx1", 3)
-	new := makeTrace("tx1", 4)
+	old := makeTraceN("tx1", 3)
+	new := makeTraceN("tx1", 4)
 
 	diff := ComputeTraceDiff(old, new)
 	if diff.IsEmpty {
@@ -45,8 +44,8 @@ func TestTraceDiff_InsertedStep(t *testing.T) {
 }
 
 func TestTraceDiff_RemovedStep(t *testing.T) {
-	old := makeTrace("tx1", 5)
-	new := makeTrace("tx1", 3)
+	old := makeTraceN("tx1", 5)
+	new := makeTraceN("tx1", 3)
 
 	diff := ComputeTraceDiff(old, new)
 	if diff.IsEmpty {
@@ -55,8 +54,8 @@ func TestTraceDiff_RemovedStep(t *testing.T) {
 }
 
 func TestTraceDiff_RenderJSON(t *testing.T) {
-	old := makeTrace("tx1", 3)
-	new := makeTrace("tx2", 3)
+	old := makeTraceN("tx1", 3)
+	new := makeTraceN("tx2", 3)
 
 	diff := ComputeTraceDiff(old, new)
 	data, err := diff.RenderJSON()
@@ -69,8 +68,8 @@ func TestTraceDiff_RenderJSON(t *testing.T) {
 }
 
 func TestTraceDiff_RenderHTML(t *testing.T) {
-	old := makeTrace("tx1", 3)
-	new := makeTrace("tx2", 3)
+	old := makeTraceN("tx1", 3)
+	new := makeTraceN("tx2", 3)
 
 	diff := ComputeTraceDiff(old, new)
 	html, err := diff.RenderHTML()
@@ -85,7 +84,7 @@ func TestTraceDiff_RenderHTML(t *testing.T) {
 // ── Issue #539: Trace streaming tests ──────────────────────────────────────────
 
 func TestStreamRoundTrip(t *testing.T) {
-	trace := makeTrace("stream-test", 10)
+	trace := makeTraceN("stream-test", 10)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trace.gbx")
@@ -126,7 +125,7 @@ func TestStreamRoundTrip(t *testing.T) {
 }
 
 func TestStreamCorruptionDetection(t *testing.T) {
-	trace := makeTrace("corrupt-test", 3)
+	trace := makeTraceN("corrupt-test", 3)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trace.gbx")
 
@@ -215,7 +214,7 @@ func TestSchemaVersion_MigrateV1toV2(t *testing.T) {
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
-func makeTrace(txHash string, numStates int) *ExecutionTrace {
+func makeTraceN(txHash string, numStates int) *ExecutionTrace {
 	t := NewExecutionTrace(txHash, 100)
 	t.StartTime = time.Now()
 	t.EndTime = time.Now().Add(time.Millisecond)

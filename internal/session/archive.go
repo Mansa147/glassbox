@@ -89,14 +89,31 @@ func ExportArchive(data *Data, destPath string) error {
 		return fmt.Errorf("%s", sb.String())
 	}
 
-	f, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("cannot create archive file %q: %w", destPath, err)
+	journalPath := destPath + ".journal"
+	if err := writeExportJournal(journalPath, destPath); err != nil {
+		return fmt.Errorf("failed to write export recovery journal: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = os.Remove(journalPath) }()
 
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return fmt.Errorf("cannot create destination directory %q: %w", destDir, err)
+	}
+	tmp, err := os.CreateTemp(destDir, filepath.Base(destPath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("cannot create archive temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	f := tmp
 	zw := zip.NewWriter(f)
-	defer func() { _ = zw.Close() }()
 
 	now := time.Now()
 
@@ -160,7 +177,40 @@ func ExportArchive(data *Data, destPath string) error {
 		return fmt.Errorf("failed to write manifest.json: %w", err)
 	}
 
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("failed to finalize archive: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync archive temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close archive temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("failed to rename archive into place: %w", err)
+	}
+	_ = syncDir(destDir)
+	succeeded = true
+
 	return nil
+}
+
+// writeExportJournal records that an archive export to destPath is in
+// progress. A leftover journal after a crash tells 'glassbox session doctor'
+// that the export was interrupted, so any orphaned temp file for destPath is
+// safe to clean up rather than a sign of unrelated disk corruption.
+func writeExportJournal(journalPath, destPath string) error {
+	entry := struct {
+		Dest      string    `json:"dest"`
+		StartedAt time.Time `json:"started_at"`
+		PID       int       `json:"pid"`
+	}{Dest: destPath, StartedAt: time.Now().UTC(), PID: os.Getpid()}
+
+	data, err := json.MarshalIndent(entry, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(journalPath, data, 0o600)
 }
 
 // ImportArchive reads a session archive produced by ExportArchive and returns

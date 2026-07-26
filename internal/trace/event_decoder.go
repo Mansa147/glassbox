@@ -391,13 +391,6 @@ func buildCallStack(trace *ExecutionTrace, step int) []string {
 	return stack
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // AttachEventsToNode walks the trace node tree and attaches decoded events to
 // the TraceNode whose ContractID matches the event. This enriches the
 // interactive viewer with inline event data.

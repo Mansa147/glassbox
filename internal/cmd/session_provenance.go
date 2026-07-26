@@ -33,7 +33,7 @@ to the most recent entries and never includes raw host details.`,
 		ctx := cmd.Context()
 		sessionID := args[0]
 
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 		}

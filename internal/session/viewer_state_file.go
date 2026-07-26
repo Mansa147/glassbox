@@ -212,31 +212,7 @@ func SaveViewerState(fingerprint string, st ViewerState) error {
 }
 
 func writeSidecarAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	// Best effort on platforms without POSIX permissions.
-	_ = tmp.Chmod(0o600)
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	return writeFileAtomic(path, data, 0o600)
 }
 
 // ResetViewerState deletes the persisted sidecar for fingerprint. It reports

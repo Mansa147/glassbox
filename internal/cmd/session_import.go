@@ -55,7 +55,7 @@ Use --preview to see what would conflict without importing anything.`,
 			return fmt.Errorf("failed to read session archive: %w", err)
 		}
 
-		store, err := session.NewStore()
+		store, err := openSessionStore()
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to open session store: %v", err))
 		}

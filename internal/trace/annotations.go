@@ -52,6 +52,9 @@ type TraceAnnotations struct {
 	ReviewerComments []ReviewerComment `json:"reviewer_comments,omitempty"`
 	SessionMetadata  map[string]string `json:"session_metadata,omitempty"`
 	GeneratedAt      time.Time         `json:"generated_at,omitempty"`
+	// Bookmarks are step-anchored bookmarks that travel with the trace, see
+	// bookmark.go [Issue #562].
+	Bookmarks []Bookmark `json:"bookmarks,omitempty"`
 }
 
 // AnnotateExecutionCosts attaches cost annotations to contract execution states.

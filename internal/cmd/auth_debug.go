@@ -81,7 +81,11 @@ func authDebugPreRunE(cmd *cobra.Command, args []string) error {
 	// transaction. This only runs after the hash is known to be well-formed.
 	if !cmd.Flags().Changed("network") {
 		token := authResolveRPCToken()
-		probeCtx, probeCancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+		baseCtx := cmd.Context()
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		probeCtx, probeCancel := context.WithTimeout(baseCtx, 5*time.Second)
 		defer probeCancel()
 		if resolved, err := rpc.ResolveNetwork(probeCtx, args[0], token); err == nil {
 			authNetworkFlag = string(resolved)

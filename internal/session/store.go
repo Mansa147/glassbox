@@ -82,11 +82,32 @@ type Data struct {
 	TraceJSON     string `json:"-"`
 	BundleJSON    string `json:"-"`
 	SourceMapJSON string `json:"-"`
+
+	// EncryptedPayload holds the sealed sensitive fields when the session
+	// is encrypted [Issue #560]. When set, EnvelopeXdr, ResultXdr,
+	// ResultMetaXdr, SimRequestJSON, SimResponseJSON, TraceJSON,
+	// BundleJSON, SourceMapJSON, and AnnotationsJSON are empty on this
+	// record — see encryption.go.
+	EncryptedPayload *EncryptedEnvelope `json:"encrypted_payload,omitempty"`
 }
 
 // Store manages session persistence in SQLite
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	keyProvider KeyProvider
+}
+
+// SetKeyProvider configures the KeyProvider used to encrypt sensitive
+// payload fields on every subsequent Save/SaveWithValidation and decrypt
+// them on every subsequent Load/LoadByName/List through this Store. Pass
+// nil to disable encryption for new writes; sessions already encrypted by a
+// previous provider still require a matching provider to load.
+//
+// There is no implicit fallback: if a caller requests encryption (by
+// configuring a provider) and the provider cannot produce a key, Save fails
+// closed rather than writing plaintext.
+func (s *Store) SetKeyProvider(kp KeyProvider) {
+	s.keyProvider = kp
 }
 
 // DefaultDBPath returns the filesystem path where the session database is stored.
@@ -199,6 +220,9 @@ func (s *Store) initSchema() error {
 		return err
 	}
 	if err := s.ensureColumn("sessions", "annotations_json", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "encrypted_payload", "TEXT"); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_name ON sessions(name) WHERE name IS NOT NULL AND name != ''`); err != nil {
@@ -353,13 +377,31 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		data.EnvFingerprint = BuildEnvFingerprint()
 	}
 
+	// Encryption [Issue #560]: when this Store was configured with a key
+	// provider, every save through it seals the sensitive payload fields
+	// before they touch disk. EncryptSessionPayload fails closed — if the
+	// provider cannot produce a key, data is left unmodified and this
+	// method returns the error without writing anything, so encryption
+	// requested with an unusable key never silently falls back to
+	// plaintext.
+	if s.keyProvider != nil {
+		if err := EncryptSessionPayload(data, s.keyProvider); err != nil {
+			return err
+		}
+	}
+	encryptedPayloadJSON, err := marshalEncryptedPayload(data.EncryptedPayload)
+	if err != nil {
+		return err
+	}
+
 	query := `
 	INSERT INTO sessions (
 		id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 		envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 		audit_hash, audit_signature, previous_session_hash,
-		sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
+		encrypted_payload, GLASSBOX_version, schema_version
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		last_access_at = excluded.last_access_at,
@@ -380,15 +422,17 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		provenance_json = excluded.provenance_json,
 		annotations_json = excluded.annotations_json,
 		GLASSBOX_version = excluded.GLASSBOX_version,
-		schema_version = excluded.schema_version
+		schema_version = excluded.schema_version,
+		encrypted_payload = excluded.encrypted_payload
 	`
 
-	_, err := s.db.ExecContext(ctx, query,
+	_, err = s.db.ExecContext(ctx, query,
 		data.ID, data.Name, data.CreatedAt, data.LastAccessAt, data.Status,
 		data.Network, data.HorizonURL, data.TxHash,
 		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr, data.PinnedEndpoint,
 		data.AuditHash, data.AuditSignature, data.PreviousSessionHash,
-		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ProvenanceJSON, data.AnnotationsJSON, data.ErstVersion, data.SchemaVersion,
+		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ProvenanceJSON, data.AnnotationsJSON,
+		encryptedPayloadJSON, data.ErstVersion, data.SchemaVersion,
 	)
 
 	if err != nil {
@@ -460,20 +504,22 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
-	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json, GLASSBOX_version, schema_version
+	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
+	       encrypted_payload, GLASSBOX_version, schema_version
 	FROM sessions
 	WHERE id = ?
 	`
 
 	var data Data
 	var createdAt, lastAccessAt string
-	var envFP, auditHash, auditSignature, prevSessionHash, provenanceJSON, annotationsJSON sql.NullString
+	var envFP, auditHash, auditSignature, prevSessionHash, provenanceJSON, annotationsJSON, encryptedPayload sql.NullString
 	err := s.db.QueryRowContext(ctx, query, sessionID).Scan(
 		&data.ID, &data.Name, &createdAt, &lastAccessAt, &data.Status,
 		&data.Network, &data.HorizonURL, &data.TxHash,
 		&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
 		&auditHash, &auditSignature, &prevSessionHash,
-		&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON, &data.ErstVersion, &data.SchemaVersion,
+		&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON,
+		&encryptedPayload, &data.ErstVersion, &data.SchemaVersion,
 	)
 	if envFP.Valid {
 		data.EnvFingerprint = envFP.String
@@ -492,6 +538,11 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	}
 	if annotationsJSON.Valid {
 		data.AnnotationsJSON = annotationsJSON.String
+	}
+	if err == nil {
+		if data.EncryptedPayload, err = unmarshalEncryptedPayload(encryptedPayload.String); err != nil {
+			return nil, fmt.Errorf("failed to load session %q: %w", sessionID, err)
+		}
 	}
 
 	if err == sql.ErrNoRows {
@@ -514,6 +565,14 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	}
 	if data.LastAccessAt, err = time.Parse(time.RFC3339, lastAccessAt); err != nil {
 		return nil, fmt.Errorf("failed to parse last_access_at for session %q: %w", sessionID, err)
+	}
+
+	// Decrypt before anything else touches the sensitive fields, so schema
+	// migration and re-save (below) both operate on plaintext. A missing or
+	// mismatched key fails the load outright rather than returning a
+	// session with silently empty sensitive fields.
+	if decErr := DecryptSessionPayload(&data, s.keyProvider); decErr != nil {
+		return nil, decErr
 	}
 
 	if schemaErr := ValidateSchemaVersion(data.SchemaVersion, data.ID); schemaErr != nil {
@@ -574,7 +633,8 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
-	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json, GLASSBOX_version, schema_version
+	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
+	       encrypted_payload, GLASSBOX_version, schema_version
 	FROM sessions
 	ORDER BY last_access_at DESC
 	`
@@ -605,12 +665,16 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 		auditHash := sql.NullString{}
 		auditSignature := sql.NullString{}
 		previousSessionHash := sql.NullString{}
+		provenanceJSON := sql.NullString{}
+		annotationsJSON := sql.NullString{}
+		encryptedPayload := sql.NullString{}
 		scanErr := rows.Scan(
 			&data.ID, &data.Name, &createdAt, &lastAccessAt, &data.Status,
 			&data.Network, &data.HorizonURL, &data.TxHash,
 			&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
 			&auditHash, &auditSignature, &previousSessionHash,
-			&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &data.ErstVersion, &data.SchemaVersion,
+			&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON,
+			&encryptedPayload, &data.ErstVersion, &data.SchemaVersion,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", scanErr)
@@ -619,6 +683,20 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 		data.AuditSignature = auditSignature.String
 		data.PreviousSessionHash = previousSessionHash.String
 		data.EnvFingerprint = envFP.String
+		data.ProvenanceJSON = provenanceJSON.String
+		data.AnnotationsJSON = annotationsJSON.String
+		// List never decrypts: listing/GC/diagnostics only need non-sensitive
+		// metadata (all of which stays plaintext regardless of encryption),
+		// so callers are never asked for a key just to see a session name.
+		if data.EncryptedPayload, scanErr = unmarshalEncryptedPayload(encryptedPayload.String); scanErr != nil {
+			return nil, fmt.Errorf("failed to parse encrypted_payload for session %q: %w", data.ID, scanErr)
+		}
+		if data.CreatedAt, scanErr = time.Parse(time.RFC3339, createdAt); scanErr != nil {
+			return nil, fmt.Errorf("failed to parse created_at for session %q: %w", data.ID, scanErr)
+		}
+		if data.LastAccessAt, scanErr = time.Parse(time.RFC3339, lastAccessAt); scanErr != nil {
+			return nil, fmt.Errorf("failed to parse last_access_at for session %q: %w", data.ID, scanErr)
+		}
 		sessions = append(sessions, &data)
 	}
 

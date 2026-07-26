@@ -6,6 +6,7 @@ package cmd
 import (
 	"archive/zip"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,12 +130,11 @@ func TestRunDoctorBundle_PathsRedacted(t *testing.T) {
 	for _, f := range zr.File {
 		rc, err := f.Open()
 		require.NoError(t, err)
-		var buf strings.Builder
-		_, _ = buf.ReadFrom(rc)
+		raw, _ := io.ReadAll(rc)
 		rc.Close()
 
 		// Home dir must not appear verbatim in any archive file.
-		assert.NotContains(t, buf.String(), home,
+		assert.NotContains(t, string(raw), home,
 			"file %s must not contain raw home directory path", f.Name)
 	}
 }
@@ -170,11 +170,10 @@ func TestRunDoctorBundle_NoSecretMaterial(t *testing.T) {
 	for _, f := range zr.File {
 		rc, err := f.Open()
 		require.NoError(t, err)
-		var buf strings.Builder
-		_, _ = buf.ReadFrom(rc)
+		raw, _ := io.ReadAll(rc)
 		rc.Close()
 
-		content := buf.String()
+		content := string(raw)
 		assert.NotContains(t, content, "tok-secret-value-xyz",
 			"file %s must not contain RPC token", f.Name)
 		assert.NotContains(t, content, "sentry.io/999",

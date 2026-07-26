@@ -32,6 +32,8 @@ var (
 	traceAnnotationsFlag       string
 	traceAnnotationsExportPath string
 	traceAnnotationsStrict     bool
+	traceBookmarksOnConflict   string
+	traceBookmarksPreview      bool
 	traceGasModelPath          string
 	traceComments              []string
 	traceMetadata              []string
@@ -434,6 +436,41 @@ Performance notes:
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "Imported %d annotation(s) from %s (%d resolved, %d dangling)\n",
 				len(file.Comments), traceAnnotationsFlag, len(report.Resolved), len(report.Dangling))
+
+			// Bookmarks [Issue #562]: merged conflict-aware rather than
+			// overwritten, so importing a colleague's bookmarks can never
+			// silently clobber your own — a real conflict is either
+			// rejected (the default) or kept alongside the existing
+			// bookmark under a new identity, never picked for you.
+			if len(file.Bookmarks) > 0 {
+				policy, policyErr := trace.ParseBookmarkConflictPolicy(traceBookmarksOnConflict)
+				if policyErr != nil {
+					return errors.WrapValidationError(policyErr.Error())
+				}
+
+				if traceBookmarksPreview {
+					conflicts := trace.DetectBookmarkConflicts(executionTrace, executionTrace.Annotations.Bookmarks, file.Bookmarks)
+					if len(conflicts) == 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "No bookmark conflicts: %d bookmark(s) would be imported cleanly.\n", len(file.Bookmarks))
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "%d bookmark conflict(s):\n", len(conflicts))
+						for i, c := range conflicts {
+							fmt.Fprintf(cmd.OutOrStdout(), "  %d. %q vs existing %q: %s\n", i+1, c.Incoming.Name, c.Existing.Name, c.Reason)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "\nRe-run with --bookmarks-on-conflict rename or merge to keep both.\n")
+					}
+					return nil
+				}
+
+				merged, mergeResult, mergeErr := trace.MergeBookmarks(
+					executionTrace, executionTrace.Annotations.Bookmarks, file.Bookmarks, policy)
+				if mergeErr != nil {
+					return errors.WrapValidationError(mergeErr.Error())
+				}
+				executionTrace.Annotations.Bookmarks = merged
+				fmt.Fprintf(cmd.ErrOrStderr(), "Imported %d bookmark(s) (%d kept under a new identity to avoid a conflict)\n",
+					len(file.Bookmarks), len(mergeResult.Renamed))
+			}
 		}
 
 		// --export-annotations: write the trace's reviewer comments to a
@@ -459,8 +496,8 @@ Performance notes:
 				}
 				return errors.WrapValidationError(saveErr.Error())
 			}
-			fmt.Printf("%s Annotations exported to: %s (%d comment(s))\n",
-				visualizer.Symbol("success"), traceAnnotationsExportPath, len(file.Comments))
+			fmt.Printf("%s Annotations exported to: %s (%d comment(s), %d bookmark(s))\n",
+				visualizer.Symbol("success"), traceAnnotationsExportPath, len(file.Comments), len(file.Bookmarks))
 
 			// Every other export flag in this command writes its file and
 			// exits. Composing --export-annotations with a report export is
@@ -713,6 +750,8 @@ func init() {
 	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Import reviewer comments from a JSON annotation file and attach them to the trace")
 	traceCmd.Flags().StringVar(&traceAnnotationsExportPath, "export-annotations", "", "Export the trace's reviewer comments to a portable JSON annotation file")
 	traceCmd.Flags().BoolVar(&traceAnnotationsStrict, "annotations-strict", false, "Fail if any imported annotation targets a step or source location missing from the trace")
+	traceCmd.Flags().StringVar(&traceBookmarksOnConflict, "bookmarks-on-conflict", "fail", "Conflict resolution policy for bookmarks imported via --annotations: fail, rename, or merge")
+	traceCmd.Flags().BoolVar(&traceBookmarksPreview, "bookmarks-preview", false, "Show bookmark conflicts from --annotations without applying them")
 	traceCmd.Flags().StringVar(&traceGasModelPath, "gas-model", "", "Gas model JSON used to annotate contract call cost estimates")
 	traceCmd.Flags().StringVar(&traceVerbosity, "trace-verbosity", "normal", "Trace detail level: summary, normal, or verbose")
 	traceCmd.Flags().StringArrayVar(&traceComments, "comment", nil, "Comment to include in exported trace artifacts; repeatable")

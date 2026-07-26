@@ -11,7 +11,7 @@ import (
 // ── Issue #540: Trace filtering tests ─────────────────────────────────────────
 
 func TestFilter_NoFilter(t *testing.T) {
-	tr := makeTrace("tx1", 5)
+	tr := makeTraceN("tx1", 5)
 	expr := &FilterExpression{}
 	if err := expr.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -66,7 +66,7 @@ func TestFilter_BySeverity(t *testing.T) {
 	tr.AddState(ExecutionState{Step: 1, ContractID: "C2", Function: "fn2"})
 	tr.AddState(ExecutionState{Step: 2, ContractID: "C3", Function: "fn3", Error: "another error"})
 
-	expr := &FilterExpression{Severity: SeverityError}
+	expr := &FilterExpression{Severity: FilterSeverityError}
 	ft, err := ApplyFilter(tr, expr)
 	if err != nil {
 		t.Fatalf("ApplyFilter: %v", err)
@@ -77,7 +77,7 @@ func TestFilter_BySeverity(t *testing.T) {
 }
 
 func TestFilter_ByStepRange(t *testing.T) {
-	tr := makeTrace("tx5", 10)
+	tr := makeTraceN("tx5", 10)
 	expr := &FilterExpression{StepMin: 3, StepMax: 7}
 	ft, err := ApplyFilter(tr, expr)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestFilter_CombinedFilters(t *testing.T) {
 	tr.AddState(ExecutionState{Step: 1, ContractID: "CA", Function: "fn2"})
 	tr.AddState(ExecutionState{Step: 2, ContractID: "CB", Function: "fn1", Error: "err"})
 
-	expr := &FilterExpression{ContractID: "CA", Severity: SeverityError}
+	expr := &FilterExpression{ContractID: "CA", Severity: FilterSeverityError}
 	ft, err := ApplyFilter(tr, expr)
 	if err != nil {
 		t.Fatalf("ApplyFilter: %v", err)
@@ -106,7 +106,7 @@ func TestFilter_CombinedFilters(t *testing.T) {
 }
 
 func TestFilter_DoesNotMutateSource(t *testing.T) {
-	tr := makeTrace("tx7", 5)
+	tr := makeTraceN("tx7", 5)
 	originalCount := len(tr.States)
 	expr := &FilterExpression{ContractID: "nonexistent"}
 	_, err := ApplyFilter(tr, expr)
@@ -133,7 +133,7 @@ func TestFilter_InvalidStepRange(t *testing.T) {
 }
 
 func TestFilter_NoMatch(t *testing.T) {
-	tr := makeTrace("tx8", 5)
+	tr := makeTraceN("tx8", 5)
 	expr := &FilterExpression{ContractID: "ZZZZZ"}
 	ft, err := ApplyFilter(tr, expr)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestFilter_NoMatch(t *testing.T) {
 }
 
 func TestFilterMetadata(t *testing.T) {
-	tr := makeTrace("tx9", 10)
+	tr := makeTraceN("tx9", 10)
 	expr := &FilterExpression{StepMin: 0, StepMax: 4}
 	ft, _ := ApplyFilter(tr, expr)
 	meta := FilterMetadataFromTrace(ft)

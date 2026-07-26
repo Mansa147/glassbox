@@ -791,7 +791,6 @@ Local WASM Replay Mode:
 		}
 
 		localEnvelopeMode := xdrFileFlag != "" || jsonFileFlag != ""
-		ctx := cmd.Context()
 		txHash := ""
 		if !localEnvelopeMode {
 			txHash = cmdArgs[0]
