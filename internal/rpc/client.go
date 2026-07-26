@@ -72,6 +72,9 @@ type Client struct {
 	// pool operation. Safe for read after a call returns; overwritten on the
 	// next call.
 	LastAttemptDiagnostics AttemptDiagnostics
+	// ResponsePayloadLimit caps the number of bytes read from any Soroban RPC
+	// response body. 0 means use DefaultResponsePayloadLimit.
+	ResponsePayloadLimit int64
 }
 
 func (c *Client) startMethodTimer(ctx context.Context, method string, attributes map[string]string) MethodTimer {

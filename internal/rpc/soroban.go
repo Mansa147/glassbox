@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -423,7 +422,7 @@ func (c *Client) getLedgerEntriesAttemptURL(ctx context.Context, keysToFetch []s
 		return nil, errors.WrapRPCResponseTooLarge(targetURL)
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "getLedgerEntries")
 	if err != nil {
 		// Record failed remote node response
 		metrics.RecordRemoteNodeResponse(targetURL, string(c.Network), false, duration)
@@ -644,7 +643,7 @@ func (c *Client) simulateTransactionAttemptURL(ctx context.Context, envelopeXdr 
 		return nil, errors.WrapRPCResponseTooLarge(targetURL)
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "simulateTransaction")
 	if err != nil {
 		logger.Logger.Error("Soroban simulateTransaction response read failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)
@@ -777,7 +776,7 @@ func (c *Client) getHealthAttemptURL(ctx context.Context, targetURL string) (hea
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "getHealth")
 	if err != nil {
 		logger.Logger.Error("Soroban getHealth response read failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)

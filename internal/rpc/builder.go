@@ -36,6 +36,8 @@ type clientBuilder struct {
 	// replayPinnedURL, when set, locks the ProviderPool to a single endpoint
 	// for deterministic replay (disables silent failover).
 	replayPinnedURL string
+	// responsePayloadLimit caps response body reads; 0 means DefaultResponsePayloadLimit.
+	responsePayloadLimit int64
 }
 
 const defaultHTTPTimeout = 15 * time.Second
@@ -263,6 +265,22 @@ func WithRequestDeadline(d time.Duration) ClientOption {
 	}
 }
 
+// WithResponsePayloadLimit sets the maximum number of bytes the client will
+// read from any Soroban RPC response body before returning a
+// PayloadTooLargeError. Use 0 to keep the default (DefaultResponsePayloadLimit,
+// currently 32 MiB). Values below 1 KiB are silently clamped to 1 KiB to
+// prevent accidental breakage.
+func WithResponsePayloadLimit(n int64) ClientOption {
+	return func(b *clientBuilder) error {
+		const minLimit = 1024
+		if n > 0 && n < minLimit {
+			n = minLimit
+		}
+		b.responsePayloadLimit = n
+		return nil
+	}
+}
+
 // WithReplayPinProvider locks the provider pool to a single endpoint URL for
 // deterministic replay. When pinned, silent failover is disabled: if the pinned
 // provider fails the error is returned immediately with an explicit message.
@@ -427,9 +445,10 @@ func (b *clientBuilder) build() (*Client, error) {
 		FailureThreshold: b.failureThreshold,
 		RetryTimeout:     b.retryTimeout,
 		middlewares:      b.middlewares,
-		healthCollector:  hc,
-		selector:         selector,
-		failoverPolicy:   policy,
-		providerPool:     pool,
+		healthCollector:      hc,
+		selector:             selector,
+		failoverPolicy:       policy,
+		providerPool:         pool,
+		ResponsePayloadLimit: b.responsePayloadLimit,
 	}, nil
 }
