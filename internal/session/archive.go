@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotandev/glassbox/internal/security"
 	"github.com/dotandev/glassbox/internal/version"
 )
 
@@ -26,6 +27,14 @@ type archiveMeta struct {
 	GlassboxVersion string `json:"glassbox_version"`
 	CreatedAt      string `json:"created_at"`
 	SchemaVersion  int    `json:"schema_version"`
+}
+
+// ArchiveOptions controls session archive export behavior
+type ArchiveOptions struct {
+	// SecretScanMode controls whether secret scanning is enabled and how it behaves
+	SecretScanMode security.ScannerMode
+	// SecretScanOverrides are paths that are allowed to contain secrets (for test fixtures)
+	SecretScanOverrides []string
 }
 
 // SupportedArchiveExtensions lists the file extensions accepted for session
@@ -66,6 +75,12 @@ func ValidateArchivePath(destPath string) error {
 // The session data is validated before export so that corrupt or incomplete
 // sessions are rejected early with a clear error rather than silently archived.
 func ExportArchive(data *Data, destPath string) error {
+	return ExportArchiveWithOptions(data, destPath, ArchiveOptions{})
+}
+
+// ExportArchiveWithOptions packages a debug session into a portable ZIP archive
+// with additional options for secret scanning and other export controls.
+func ExportArchiveWithOptions(data *Data, destPath string, opts ArchiveOptions) error {
 	if data == nil {
 		return fmt.Errorf("session data is nil")
 	}
@@ -87,6 +102,47 @@ func ExportArchive(data *Data, destPath string) error {
 		}
 		sb.WriteString("Fix the issues above and re-run 'glassbox session share'.")
 		return fmt.Errorf("%s", sb.String())
+	}
+
+	// Secret scanning — detect and optionally block exports containing secrets
+	if opts.SecretScanMode != "" {
+		scanner := security.NewSecretScanner(opts.SecretScanMode)
+		for _, override := range opts.SecretScanOverrides {
+			scanner.AddOverride(override)
+		}
+
+		// Scan session fields that might contain secrets
+		fieldsToScan := map[string]string{
+			"pinned_endpoint": data.PinnedEndpoint,
+			"horizon_url":      data.HorizonURL,
+		}
+
+		result := scanner.ScanMap(fieldsToScan, "session")
+		if result.HasSecrets {
+			if scanner.ShouldBlockExport(result) {
+				return fmt.Errorf(scanner.GetErrorMessage(result))
+			}
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
+		}
+
+		// Scan annotations if present
+		if data.AnnotationsJSON != "" {
+			var annotations map[string]interface{}
+			if err := json.Unmarshal([]byte(data.AnnotationsJSON), &annotations); err == nil {
+				// Convert annotations to string map for scanning
+				annotationsStr := make(map[string]string)
+				for k, v := range annotations {
+					annotationsStr[k] = fmt.Sprintf("%v", v)
+				}
+				result := scanner.ScanMap(annotationsStr, "annotations")
+				if result.HasSecrets {
+					if scanner.ShouldBlockExport(result) {
+						return fmt.Errorf(scanner.GetErrorMessage(result))
+					}
+					fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
+				}
+			}
+		}
 	}
 
 	journalPath := destPath + ".journal"

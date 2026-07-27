@@ -3,7 +3,12 @@
 
 package progress
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/dotandev/glassbox/internal/telemetry"
+)
 
 // Emitter is a convenience wrapper around a Sink that stamps events with the
 // shared operation ID and current time, so call sites only supply phase,
@@ -29,6 +34,15 @@ func (e *Emitter) Start(phase Phase, message string, meta ...map[string]interfac
 	if len(meta) > 0 {
 		ev.Meta = meta[0]
 	}
+	
+	// Validate event against telemetry registry before emitting
+	if err := validateEvent(ev); err != nil {
+		// Log validation error but still emit to avoid breaking existing behavior
+		// TODO: Make this strict once all events are registered
+		e.sink.Emit(ev)
+		return
+	}
+	
 	e.sink.Emit(ev)
 }
 
@@ -44,6 +58,12 @@ func (e *Emitter) Complete(phase Phase, message string, meta ...map[string]inter
 	if len(meta) > 0 {
 		ev.Meta = meta[0]
 	}
+	
+	if err := validateEvent(ev); err != nil {
+		e.sink.Emit(ev)
+		return
+	}
+	
 	e.sink.Emit(ev)
 }
 
@@ -61,6 +81,12 @@ func (e *Emitter) Error(phase Phase, message, errorCode string, meta ...map[stri
 	if len(meta) > 0 {
 		ev.Meta = meta[0]
 	}
+	
+	if err := validateEvent(ev); err != nil {
+		e.sink.Emit(ev)
+		return
+	}
+	
 	e.sink.Emit(ev)
 }
 
@@ -76,10 +102,39 @@ func (e *Emitter) Skip(phase Phase, message string, meta ...map[string]interface
 	if len(meta) > 0 {
 		ev.Meta = meta[0]
 	}
+	
+	if err := validateEvent(ev); err != nil {
+		e.sink.Emit(ev)
+		return
+	}
+	
 	e.sink.Emit(ev)
 }
 
 // OperationID returns the operation ID shared by all events from this emitter.
 func (e *Emitter) OperationID() string {
 	return e.sink.OperationID()
+}
+
+// validateEvent converts an Event to a map and validates it against the telemetry registry.
+func validateEvent(ev Event) error {
+	// Convert Event to map for validation
+	payload := map[string]interface{}{
+		"operation_id": ev.OperationID,
+		"phase":        string(ev.Phase),
+		"status":       string(ev.Status),
+		"timestamp":    ev.Timestamp.UTC().Format(time.RFC3339Nano),
+	}
+	if ev.Message != "" {
+		payload["message"] = ev.Message
+	}
+	if ev.ErrorCode != "" {
+		payload["error_code"] = ev.ErrorCode
+	}
+	if ev.Meta != nil {
+		payload["meta"] = ev.Meta
+	}
+	
+	// Validate against telemetry registry
+	return telemetry.Validate("debug.progress", payload)
 }

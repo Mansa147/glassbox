@@ -12,6 +12,7 @@ import (
 
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/plan"
+	"github.com/dotandev/glassbox/internal/security"
 	"github.com/dotandev/glassbox/internal/session"
 	"github.com/dotandev/glassbox/internal/version"
 	"github.com/spf13/cobra"
@@ -29,6 +30,10 @@ var (
 	sessionEncryptFlag       bool
 	sessionKeyProviderFlag   string
 	sessionKeyPassphraseFlag string
+
+	// Secret scanning flags for session export
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
 )
 
 // openSessionStore opens the session store at the default location and, if

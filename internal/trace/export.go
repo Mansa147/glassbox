@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/abi"
+	"github.com/dotandev/glassbox/internal/security"
 )
 
 type exportState struct {
@@ -77,6 +78,10 @@ type ExportOptions struct {
 	// ReviewerComments are merged into the trace's own reviewer comments for
 	// this export only, matching how Comments and SessionMetadata behave.
 	ReviewerComments []ReviewerComment
+	// SecretScanMode controls whether secret scanning is enabled and how it behaves
+	SecretScanMode security.ScannerMode
+	// SecretScanOverrides are paths that are allowed to contain secrets (for test fixtures)
+	SecretScanOverrides []string
 }
 
 const traceHTMLTemplate = `<!doctype html>
@@ -655,6 +660,57 @@ func ExportExecutionTraceWithOptions(trace *ExecutionTrace, format string, outpu
 		if te, ok := err.(*TraceInputError); ok {
 			for _, f := range te.Failures {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", f)
+			}
+		}
+	}
+
+	// Secret scanning — detect and optionally block exports containing secrets
+	if opts.SecretScanMode != "" {
+		scanner := security.NewSecretScanner(opts.SecretScanMode)
+		for _, override := range opts.SecretScanOverrides {
+			scanner.AddOverride(override)
+		}
+
+		// Scan session metadata
+		if len(opts.SessionMetadata) > 0 {
+			result := scanner.ScanMap(opts.SessionMetadata, "session_metadata")
+			if result.HasSecrets {
+				if scanner.ShouldBlockExport(result) {
+					return fmt.Errorf(scanner.GetErrorMessage(result))
+				}
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
+			}
+		}
+
+		// Scan comments
+		for i, comment := range opts.Comments {
+			location := fmt.Sprintf("comments[%d]", i)
+			finding := scanner.ScanString(comment, location)
+			if finding.Type != "" {
+				result := security.ScanResult{
+					Findings:   []security.SecretFinding{finding},
+					HasSecrets: true,
+				}
+				if scanner.ShouldBlockExport(result) {
+					return fmt.Errorf(scanner.GetErrorMessage(result))
+				}
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
+			}
+		}
+
+		// Scan reviewer comments
+		for i, comment := range opts.ReviewerComments {
+			location := fmt.Sprintf("reviewer_comments[%d].body", i)
+			finding := scanner.ScanString(comment.Body, location)
+			if finding.Type != "" {
+				result := security.ScanResult{
+					Findings:   []security.SecretFinding{finding},
+					HasSecrets: true,
+				}
+				if scanner.ShouldBlockExport(result) {
+					return fmt.Errorf(scanner.GetErrorMessage(result))
+				}
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
 			}
 		}
 	}

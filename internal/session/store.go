@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/logger"
+	"github.com/dotandev/glassbox/internal/security"
 	"github.com/dotandev/glassbox/internal/simulator"
 	"github.com/dotandev/glassbox/internal/version"
 	_ "modernc.org/sqlite"

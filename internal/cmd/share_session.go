@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/errors"
+	"github.com/dotandev/glassbox/internal/security"
 	"github.com/dotandev/glassbox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -43,6 +44,25 @@ Validation:
 		outputFlag, _ := cmd.Flags().GetString("output")
 		redactFlag, _ := cmd.Flags().GetString("redact")
 		previewFlag, _ := cmd.Flags().GetBool("preview")
+
+		// Parse secret scan mode
+		var scanMode security.ScannerMode
+		if secretScanModeFlag != "" {
+			switch strings.ToUpper(strings.TrimSpace(secretScanModeFlag)) {
+			case "OPT_IN":
+				scanMode = security.ModeOptIn
+			case "STRICT":
+				scanMode = security.ModeStrict
+			default:
+				return errors.WrapValidationError(
+					fmt.Sprintf(
+						"--secret-scan-mode must be either 'opt-in' or 'strict', got %q\n"+
+							"  Fix: use --secret-scan-mode opt-in (warn only) or --secret-scan-mode strict (block export)",
+						secretScanModeFlag,
+					),
+				)
+			}
+		}
 
 		profile, err := session.ParseRedactionProfile(redactFlag)
 		if err != nil {
@@ -100,7 +120,12 @@ Validation:
 			printRedactionReport(cmd.OutOrStdout(), report)
 		}
 
-		if err := session.ExportArchive(redacted, dest); err != nil {
+		// Export with secret scanning options
+		archiveOpts := session.ArchiveOptions{
+			SecretScanMode:     scanMode,
+			SecretScanOverrides: secretScanOverrideFlag,
+		}
+		if err := session.ExportArchiveWithOptions(redacted, dest, archiveOpts); err != nil {
 			return fmt.Errorf("failed to export session archive: %w", err)
 		}
 
@@ -217,6 +242,8 @@ func init() {
 	sessionShareCmd.Flags().StringP("output", "o", "", "Output archive path (default: auto-generated .gbx file)")
 	sessionShareCmd.Flags().String("redact", "full", "Redaction profile applied before export: strict, balanced, or full (default: full, unredacted)")
 	sessionShareCmd.Flags().Bool("preview", false, "Show what --redact would remove without writing an archive")
+	sessionShareCmd.Flags().String("secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	sessionShareCmd.Flags().StringArray("secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
 
 	sessionCmd.AddCommand(sessionShareCmd)
 	sessionCmd.AddCommand(sessionLoadCmd)
