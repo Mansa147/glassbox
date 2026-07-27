@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dotandev/glassbox/internal/errors"
+	"github.com/dotandev/glassbox/internal/health"
 	"github.com/dotandev/glassbox/internal/logger"
 	stellarrpc "github.com/dotandev/glassbox/internal/rpc"
 	"github.com/dotandev/glassbox/internal/simulator"
@@ -23,9 +24,10 @@ import (
 
 // Server represents the JSON-RPC daemon server
 type Server struct {
-	rpcClient *stellarrpc.Client
-	simulator *simulator.Runner
-	authToken string
+	rpcClient     *stellarrpc.Client
+	simulator     *simulator.Runner
+	authToken     string
+	healthHandler *health.Handler
 }
 
 // Config holds daemon configuration
@@ -93,11 +95,30 @@ func NewServer(config Config) (*Server, error) {
 		return nil, errors.WrapSimulatorNotFound(err.Error())
 	}
 
-	return &Server{
+	h := &Server{
 		rpcClient: client,
 		simulator: sim,
 		authToken: config.AuthToken,
-	}, nil
+	}
+
+	// Build health handler and register lightweight checks.
+	// These checks are read-only and never trigger expensive replay work.
+	hh := health.NewHandler()
+
+	// Simulator availability check: verify the runner binary can be located.
+	hh.Register(health.NewChecker("simulator", func(_ context.Context) error {
+		_, checkErr := simulator.NewRunner("", false)
+		return checkErr
+	}))
+
+	// RPC connectivity check: verify the configured RPC endpoint is reachable.
+	hh.Register(health.NewChecker("rpc", func(ctx context.Context) error {
+		_, checkErr := client.GetHealth(ctx)
+		return checkErr
+	}))
+
+	h.healthHandler = hh
+	return h, nil
 }
 
 // authenticate validates the authorization token
