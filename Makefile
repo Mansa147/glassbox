@@ -372,3 +372,63 @@ if score < threshold:
 else:
     print(f"\nPASS: mutation score {score}% meets threshold {threshold}%")
 PYEOF
+
+# ──────────────────────────────────────────────
+# Dependency Compatibility testing
+#
+# These targets mirror the steps in .github/workflows/dep-compat.yml and can
+# be run locally before or after a dependency bump.
+#
+# Typical workflow after a planned SDK/host/crypto upgrade:
+#   1. make dep-compat-capture-update   # regenerate golden baselines
+#   2. git diff internal/depcompat/testdata/golden/
+#   3. make dep-compat-compare          # verify no unexpected regressions remain
+#   4. Commit the updated baselines in a PR.
+# ──────────────────────────────────────────────
+
+# Run the depcompat Go package tests only (fast, no binary required).
+dep-compat-test:
+	@echo "Running depcompat unit tests..."
+	@go test -race -v ./internal/depcompat/...
+	@echo "✓ depcompat unit tests passed"
+
+# Capture harness outputs for all dep groups (requires a built binary).
+dep-compat-capture:
+	@echo "Capturing dep-compat outputs..."
+	@bash scripts/dep-compat-capture.sh --output-dir /tmp/depcompat-capture
+
+# Dry-run capture: show what would be executed without running the harness.
+dep-compat-capture-dry:
+	@bash scripts/dep-compat-capture.sh --dry-run --output-dir /tmp/depcompat-capture-dry
+
+# Capture AND overwrite golden baselines. Review the diff before committing.
+dep-compat-capture-update:
+	@echo "Capturing and updating golden baselines..."
+	@bash scripts/dep-compat-capture.sh \
+		--output-dir /tmp/depcompat-capture-update \
+		--update-golden
+	@echo ""
+	@echo "Review the changes with:"
+	@echo "  git diff internal/depcompat/testdata/golden/"
+
+# Compare the last capture against golden baselines, emit report to stdout.
+dep-compat-compare:
+	@echo "Comparing dep-compat outputs against goldens..."
+	@bash scripts/dep-compat-compare.sh \
+		--captured-dir /tmp/depcompat-capture \
+		--fail-on-unexpected
+	@echo "✓ dep-compat comparison complete"
+
+# Run capture + compare in a single pass (local full check).
+dep-compat: dep-compat-capture dep-compat-compare
+
+# Run the Go-layer report generator against a captured dir.
+# Usage: make dep-compat-report CAPTURED_DIR=/tmp/depcompat-capture
+dep-compat-report:
+	@go run ./cmd/dep-compat-report \
+		--captured-dir "$(CAPTURED_DIR)" \
+		--output-json "$(or $(REPORT_FILE),/tmp/compat-report.json)" \
+		--verbose
+
+.PHONY: dep-compat dep-compat-test dep-compat-capture dep-compat-capture-dry \
+        dep-compat-capture-update dep-compat-compare dep-compat-report
