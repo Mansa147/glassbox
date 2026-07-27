@@ -177,6 +177,13 @@ func LoadVersionedTrace(path string, compatOpts CompatibilityOptions) (*Executio
 				joinVersions(SupportedJSONSchemaVersions),
 			)
 		}
+		// Validate the schema version string itself (format, numeric components).
+		if err := ValidateJSONSchemaVersion(probe.SchemaVersion); err != nil {
+			return nil, fmt.Errorf(
+				"malformed schema_version %q in trace file %q: %w\n"+
+					"  Fix: re-export the trace with the current CLI — schema_version must be \"MAJOR.MINOR\"",
+				probe.SchemaVersion, path, err)
+		}
 		if probe.SchemaVersion != CurrentJSONSchemaVersion {
 			fmt.Fprintf(os.Stderr,
 				"Warning: trace file %q uses schema_version %q; current is %q\n"+

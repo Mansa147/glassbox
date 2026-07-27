@@ -44,6 +44,7 @@ var (
 	traceTimingsFlag           bool // --timings: structured phase timing via diagnostics
 	traceForceFlag             bool
 	traceFormatAlias           string // --format is a user-friendly alias for --export-format
+	traceVerifyExportFlag      string // --verify-export: verify integrity of an existing export file
 
 	// Secret scanning flags
 	secretScanModeFlag       string
@@ -97,7 +98,13 @@ Performance notes:
   Large traces (>5 000 steps) can produce slow HTML rendering.
   Use --format json for large traces or CI pipelines.
   Use --trace-verbosity summary to reduce output size significantly.
-  Use --dry-run to validate parameters without writing any files.`,
+  Use --dry-run to validate parameters without writing any files.
+
+Export verification:
+  Use --verify-export <file> to check the integrity of an existing export.
+  The command verifies the checksum, step count, schema version recorded in
+  the companion .meta.json file, and that the file extension matches the
+  declared format.  No trace file argument is required in this mode.`,
 	Example: `  # Open the interactive trace viewer
   glassbox trace execution.json
 
@@ -139,7 +146,13 @@ Performance notes:
   glassbox trace --annotations review.json --annotations-strict execution.json
 
   # Force overwrite of an existing output file
-  glassbox trace --export trace.html --force execution.json`,
+  glassbox trace --export trace.html --force execution.json
+
+  # Verify the integrity of an existing export (checksum, step count, schema version)
+  glassbox trace --verify-export trace.json
+
+  # Verify-export exits with a non-zero code when integrity checks fail (suitable for CI)
+  glassbox trace --verify-export ./artifacts/trace.json && echo "OK"`,
 	Args: cobra.MaximumNArgs(1),
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		var failures []string
@@ -279,6 +292,13 @@ Performance notes:
 			}
 		}
 
+		// Validate --verify-export path when set.
+		if traceVerifyExportFlag != "" {
+			if _, err := ValidateInputPath("verify-export", traceVerifyExportFlag); err != nil {
+				failures = append(failures, err.Error())
+			}
+		}
+
 		if len(failures) == 1 {
 			return errors.WrapValidationError(failures[0])
 		}
@@ -299,6 +319,22 @@ Performance notes:
 			diagCollector = diagnostics.NewCollector()
 		} else {
 			diagCollector = diagnostics.Noop()
+		}
+
+		// --verify-export: verify integrity of an existing export file and exit.
+		// This mode does not require a trace file argument — it only reads the
+		// export artifact and its companion .meta.json file.
+		if traceVerifyExportFlag != "" {
+			if err := trace.VerifyExport(traceVerifyExportFlag); err != nil {
+				return errors.WrapValidationError(fmt.Sprintf(
+					"export integrity check failed for %q:\n  %s\n"+
+						"  Fix: re-export the trace with 'glassbox trace --export <file> --format <fmt> <trace>'",
+					traceVerifyExportFlag, err.Error(),
+				))
+			}
+			fmt.Printf("%s Export integrity verified: %s\n",
+				visualizer.Symbol("success"), traceVerifyExportFlag)
+			return nil
 		}
 
 		// Capture the cobra context so we can check for Ctrl-C throughout.
@@ -765,6 +801,7 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceForceFlag, "force", false, "Overwrite existing output files without prompting")
 	traceCmd.Flags().BoolVar(&traceShowTimingFlag, "show-timing", false, "Print load, render, and export timing to stderr")
 	traceCmd.Flags().BoolVar(&traceTimingsFlag, "timings", false, "Print per-phase timing breakdown to stderr after the operation completes")
+	traceCmd.Flags().StringVar(&traceVerifyExportFlag, "verify-export", "", "Verify integrity of an existing export file (checksum, step count, schema version)")
 
 	// Secret scanning flags
 	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
