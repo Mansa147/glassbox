@@ -19,6 +19,7 @@ import (
 	"github.com/dotandev/glassbox/internal/config"
 	"github.com/dotandev/glassbox/internal/deeplink"
 	"github.com/dotandev/glassbox/internal/rpc"
+	"github.com/dotandev/glassbox/internal/telemetry"
 
 	"github.com/spf13/cobra"
 )
@@ -64,6 +65,7 @@ const (
 	DepConfigTOML        DependencyID = "toml_config"
 	DepRPC               DependencyID = "rpc"
 	DepDeepLink          DependencyID = "deep_link"
+	DepTelemetryQueue    DependencyID = "telemetry_queue"
 )
 
 const (
@@ -146,6 +148,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checkConfigTOML(verbose),
 		checkRPC(verbose),
 		checkDeepLink(verbose),
+		checkTelemetryQueue(verbose),
 	}
 
 	// Print results
@@ -721,6 +724,56 @@ func runFixers(deps []DependencyStatus, skipConfirm, verbose bool) error {
 		fmt.Println("[OK] No fixes needed")
 	}
 	return nil
+}
+
+// checkTelemetryQueue reports the offline telemetry queue health:
+// event count, oldest event age, file size, and in-process drop counters.
+// The check is always "OK" (Installed = true) because the queue is optional;
+// it reports metrics rather than a pass/fail dependency.
+func checkTelemetryQueue(verbose bool) DependencyStatus {
+	dep := DependencyStatus{
+		ID:   DepTelemetryQueue,
+		Name: "Telemetry offline queue",
+	}
+
+	stats := telemetry.GetQueueStats()
+
+	if stats.Bytes == 0 && stats.EventCount == 0 {
+		dep.Installed = true
+		dep.Version = "empty"
+		return dep
+	}
+
+	// Format a human-readable summary.
+	version := fmt.Sprintf("%d events, %d B", stats.EventCount, stats.Bytes)
+	if stats.OldestEventAge > 0 {
+		hours := int(stats.OldestEventAge.Hours())
+		version += fmt.Sprintf(", oldest %dh", hours)
+	}
+	if stats.DroppedBySize > 0 || stats.DroppedByAge > 0 {
+		version += fmt.Sprintf(
+			", dropped this session: %d (size) + %d (age)",
+			stats.DroppedBySize, stats.DroppedByAge,
+		)
+	}
+
+	dep.Installed = true
+	dep.Version = version
+
+	if verbose {
+		dep.Path = telemetry.QueueFilePath()
+	}
+
+	// Warn (but do not fail) when the queue is near its limits.
+	if stats.EventCount >= telemetry.MaxQueueSize || stats.Bytes >= telemetry.MaxQueueBytes {
+		dep.FixHint = fmt.Sprintf(
+			"Queue is at or near limits (%d/%d events, %d/%d B) — oldest events are being dropped",
+			stats.EventCount, telemetry.MaxQueueSize,
+			stats.Bytes, telemetry.MaxQueueBytes,
+		)
+	}
+
+	return dep
 }
 
 func init() {
