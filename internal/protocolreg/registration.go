@@ -41,6 +41,11 @@ type VerificationReport struct {
 	Issues   []string
 	// ElapsedMs is how long the verification took in milliseconds.
 	ElapsedMs int64
+	// TraceContext carries the W3C trace identifiers for the active registration
+	// verification span. When set, the Glassbox backend can correlate this
+	// verification result with an originating distributed trace for accurate
+	// session attribution.
+	TraceContext *URITraceContext
 }
 
 // validatePathLength checks that a path is within acceptable length limits.

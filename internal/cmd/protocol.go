@@ -316,6 +316,39 @@ Exit codes:
 			debugArgs = append(debugArgs, "--mock-ledger-entry", entry)
 		}
 
+		// Validate W3C trace-context fields when present.
+		// Invalid trace context does not abort dispatch — it surfaces a warning
+		// so the user knows correlation may be incomplete without blocking the
+		// debug session.  The validated context is propagated to the child via
+		// environment variables so callers that embed trace propagation headers
+		// can correlate the debug session with an originating distributed trace.
+		tc := protocolreg.TraceContextFromURI(parsed)
+		if tc != nil {
+			validation := protocolreg.ValidateTraceContext(tc)
+			if !validation.OK {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"[WARN] trace context in URI has validation issues — "+
+						"distributed trace correlation may be incomplete:\n%s\n",
+					validation.Summary(),
+				)
+			} else {
+				// Propagate valid trace context via environment so the child
+				// debug process can attach to the originating trace span.
+				if tc.Traceparent != "" {
+					_ = os.Setenv("GLASSBOX_TRACEPARENT", tc.Traceparent)
+				}
+				if tc.Tracestate != "" {
+					_ = os.Setenv("GLASSBOX_TRACESTATE", tc.Tracestate)
+				}
+				if tc.TraceID != "" {
+					_ = os.Setenv("GLASSBOX_TRACE_ID", tc.TraceID)
+				}
+				if tc.SpanID != "" {
+					_ = os.Setenv("GLASSBOX_SPAN_ID", tc.SpanID)
+				}
+			}
+		}
+
 		child := exec.CommandContext(cmd.Context(), executablePath, debugArgs...)
 		child.Stdout = cmd.OutOrStdout()
 		child.Stderr = cmd.ErrOrStderr()

@@ -14,6 +14,32 @@ import (
 	"github.com/dotandev/glassbox/internal/simulator"
 )
 
+// traceparentPattern matches a W3C traceparent header value:
+//
+//	<version>-<trace-id>-<parent-id>-<trace-flags>
+//
+// version    — 2 lowercase hex digits (must be "00" for the current spec)
+// trace-id   — 32 lowercase hex digits (128-bit)
+// parent-id  — 16 lowercase hex digits (64-bit)
+// trace-flags — 2 lowercase hex digits (e.g. "01" = sampled)
+//
+// Reference: https://www.w3.org/TR/trace-context/#traceparent-header
+var traceparentPattern = regexp.MustCompile(
+	`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`,
+)
+
+// traceIDPattern matches a standalone 32-character lowercase hex trace ID.
+var traceIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// spanIDPattern matches a standalone 16-character lowercase hex span ID.
+var spanIDPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+const (
+	// maxTracestateLen is the maximum length of the tracestate header value.
+	// W3C specifies 512 bytes as the practical limit per list-member.
+	maxTracestateLen = 512
+)
+
 var txHashPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
 const (
@@ -42,15 +68,20 @@ var allowedViews = map[string]bool{
 //
 // Supported URI format:
 //
-//	glassbox://debug/<txhash>?network=<n>[&op=<i>][&operation=<i>][&view=<v>][&source=<s>][&signature=<s>]
+//	glassbox://debug/<txhash>?network=<n>[&op=<i>][&operation=<i>][&view=<v>][&source=<s>][&signature=<s>][&traceparent=<w3c>][&tracestate=<w3c>][&trace-id=<hex32>][&span-id=<hex16>]
 //
 // Query parameters:
-//   - network  (required) — one of: testnet, mainnet, futurenet
-//   - op       (optional) — zero-based operation index (alias for "operation")
-//   - operation (optional) — zero-based operation index (legacy; "op" takes precedence)
-//   - view     (optional) — initial view mode: trace, flamegraph, events, auth, budget, storage
-//   - source   (optional) — free-form source identifier (e.g. "dashboard")
-//   - signature (optional) — free-form signature hint
+//   - network     (required) — one of: testnet, mainnet, futurenet
+//   - op          (optional) — zero-based operation index (alias for "operation")
+//   - operation   (optional) — zero-based operation index (legacy; "op" takes precedence)
+//   - view        (optional) — initial view mode: trace, flamegraph, events, auth, budget, storage
+//   - source      (optional) — free-form source identifier (e.g. "dashboard")
+//   - signature   (optional) — free-form signature hint
+//   - traceparent (optional) — W3C traceparent header for distributed trace correlation
+//     (format: 00-<32hex>-<16hex>-<2hex>, e.g. 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01)
+//   - tracestate  (optional) — W3C tracestate vendor data accompanying traceparent
+//   - trace-id    (optional) — standalone 32-character hex trace ID (used when traceparent absent)
+//   - span-id     (optional) — standalone 16-character hex span ID (used when traceparent absent)
 type ParsedDebugURI struct {
 	// Raw is the original unmodified URI string.
 	Raw string
@@ -77,6 +108,27 @@ type ParsedDebugURI struct {
 	MockLedgerManifest string
 	// MockLedgerEntries is the optional list of mock ledger key:value overrides.
 	MockLedgerEntries []string
+
+	// ── Trace context fields ──────────────────────────────────────────────
+	//
+	// These fields carry W3C Trace Context identifiers so that a deep-link
+	// invocation can be correlated with the originating distributed trace.
+	// Populating them allows the Glassbox UI and backend to attach trace spans
+	// to the correct parent context, improving trace accuracy and session
+	// attribution.
+
+	// Traceparent is the validated W3C traceparent header value, if present.
+	// Format: 00-<trace-id:32hex>-<parent-id:16hex>-<flags:2hex>
+	// Example: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	Traceparent string
+	// Tracestate is the optional W3C tracestate vendor data accompanying Traceparent.
+	Tracestate string
+	// TraceID is the 32-character hex trace identifier. Extracted from Traceparent
+	// when present; otherwise populated directly from the "trace-id" query parameter.
+	TraceID string
+	// SpanID is the 16-character hex span/parent-span identifier. Extracted from
+	// Traceparent when present; otherwise populated from the "span-id" query parameter.
+	SpanID string
 }
 
 // ParseDebugURI parses and validates a glassbox:// debug URI.
@@ -253,6 +305,137 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 			return nil, fmt.Errorf("invalid view %q: must be one of trace, flamegraph, events, auth, budget, storage", view)
 		}
 		result.View = view
+	}
+
+	// --- traceparent (optional, W3C Trace Context) ---
+	//
+	// When present the value must be a valid W3C traceparent header:
+	//   <version>-<trace-id>-<parent-id>-<flags>
+	//   e.g. 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+	//
+	// On success, TraceID and SpanID are extracted from the traceparent so
+	// callers never need to parse the compound value themselves.
+	if tp := q.Get("traceparent"); tp != "" {
+		tp = strings.ToLower(strings.TrimSpace(tp))
+		if strings.ContainsRune(tp, 0) {
+			return nil, fmt.Errorf(
+				"traceparent parameter contains null bytes and cannot be used",
+			)
+		}
+		if !traceparentPattern.MatchString(tp) {
+			return nil, fmt.Errorf(
+				"invalid traceparent %q: must follow W3C format 00-<32hex>-<16hex>-<2hex>\n"+
+					"  Fix: use a valid W3C traceparent value, e.g. 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+				tp,
+			)
+		}
+		parts := strings.SplitN(tp, "-", 4)
+		// parts[0] = version, parts[1] = trace-id, parts[2] = parent-id, parts[3] = flags
+		if parts[0] != "00" {
+			return nil, fmt.Errorf(
+				"unsupported traceparent version %q: only version \"00\" is supported\n"+
+					"  Fix: use a traceparent beginning with \"00-\"",
+				parts[0],
+			)
+		}
+		// Reject all-zero trace-id (invalid per spec §2.2.3).
+		if parts[1] == strings.Repeat("0", 32) {
+			return nil, fmt.Errorf(
+				"invalid traceparent: trace-id must not be all zeros\n"+
+					"  Fix: use a non-zero 32-character hex trace ID",
+			)
+		}
+		// Reject all-zero parent-id (invalid per spec §2.2.4).
+		if parts[2] == strings.Repeat("0", 16) {
+			return nil, fmt.Errorf(
+				"invalid traceparent: parent-id must not be all zeros\n"+
+					"  Fix: use a non-zero 16-character hex span ID",
+			)
+		}
+		result.Traceparent = tp
+		result.TraceID = parts[1]
+		result.SpanID = parts[2]
+	}
+
+	// --- tracestate (optional, W3C Trace Context) ---
+	//
+	// tracestate carries vendor-specific trace data and is only meaningful
+	// alongside a traceparent. We accept it without requiring traceparent so
+	// that partial propagation does not hard-fail, but we validate length and
+	// reject null bytes.
+	if ts := q.Get("tracestate"); ts != "" {
+		if strings.ContainsRune(ts, 0) {
+			return nil, fmt.Errorf(
+				"tracestate parameter contains null bytes and cannot be used",
+			)
+		}
+		if len(ts) > maxTracestateLen {
+			return nil, fmt.Errorf(
+				"tracestate parameter is too long (%d characters, max %d)\n"+
+					"  Fix: truncate the tracestate value to at most %d characters",
+				len(ts), maxTracestateLen, maxTracestateLen,
+			)
+		}
+		result.Tracestate = ts
+	}
+
+	// --- trace-id (optional, standalone) ---
+	//
+	// Used when the caller cannot produce a full traceparent (e.g. older
+	// clients). If traceparent was already parsed, the trace-id param is
+	// silently ignored in favour of the richer traceparent value.
+	if result.TraceID == "" {
+		if tid := q.Get("trace-id"); tid != "" {
+			tid = strings.ToLower(strings.TrimSpace(tid))
+			if strings.ContainsRune(tid, 0) {
+				return nil, fmt.Errorf(
+					"trace-id parameter contains null bytes and cannot be used",
+				)
+			}
+			if !traceIDPattern.MatchString(tid) {
+				return nil, fmt.Errorf(
+					"invalid trace-id %q: must be a 32-character lowercase hex string\n"+
+						"  Fix: provide a valid 128-bit trace identifier, e.g. 4bf92f3577b34da6a3ce929d0e0e4736",
+					tid,
+				)
+			}
+			if tid == strings.Repeat("0", 32) {
+				return nil, fmt.Errorf(
+					"invalid trace-id: must not be all zeros\n"+
+						"  Fix: use a non-zero 32-character hex trace ID",
+				)
+			}
+			result.TraceID = tid
+		}
+	}
+
+	// --- span-id (optional, standalone) ---
+	//
+	// Used alongside trace-id when traceparent is absent. If traceparent was
+	// already parsed, the span-id param is silently ignored.
+	if result.SpanID == "" {
+		if sid := q.Get("span-id"); sid != "" {
+			sid = strings.ToLower(strings.TrimSpace(sid))
+			if strings.ContainsRune(sid, 0) {
+				return nil, fmt.Errorf(
+					"span-id parameter contains null bytes and cannot be used",
+				)
+			}
+			if !spanIDPattern.MatchString(sid) {
+				return nil, fmt.Errorf(
+					"invalid span-id %q: must be a 16-character lowercase hex string\n"+
+						"  Fix: provide a valid 64-bit span identifier, e.g. 00f067aa0ba902b7",
+					sid,
+				)
+			}
+			if sid == strings.Repeat("0", 16) {
+				return nil, fmt.Errorf(
+					"invalid span-id: must not be all zeros\n"+
+						"  Fix: use a non-zero 16-character hex span ID",
+				)
+			}
+			result.SpanID = sid
+		}
 	}
 
 	return result, nil
