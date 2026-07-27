@@ -84,14 +84,33 @@ func (c *Client) startMethodTimer(ctx context.Context, method string, attributes
 	return c.methodTelemetry.StartMethodTimer(ctx, method, attributes)
 }
 
-// GetTransaction fetches the transaction details and full XDR data
+// GetTransaction fetches the transaction details and full XDR data.
+// The result is stored in the content-addressed cache after the first
+// successful fetch so that identical subsequent calls can be served
+// offline without any RPC round-trip.
 func (c *Client) GetTransaction(ctx context.Context, hash string) (*TransactionResponse, error) {
+	// Cache check — transactions are immutable once on-chain.
+	if c.CacheEnabled {
+		if cached, ok, err := GetTransaction(c.GetNetworkName(), hash); ok {
+			logger.Logger.Debug("Transaction served from cache", "hash", hash, "network", c.GetNetworkName())
+			return cached, nil
+		} else if err != nil {
+			logger.Logger.Warn("Cache read error for transaction", "hash", hash, "error", err)
+		}
+	}
+
 	attempts := c.endpointAttempts()
 	var failures []NodeFailure
 	for attempt := 0; attempt < attempts; attempt++ {
 		resp, err := c.getTransactionAttempt(ctx, hash)
 		if err == nil {
 			c.markSuccess(c.HorizonURL)
+			// Store in cache so the next identical request is served offline.
+			if c.CacheEnabled {
+				if cacheErr := SetTransaction(c.GetNetworkName(), hash, resp); cacheErr != nil {
+					logger.Logger.Warn("Failed to cache transaction", "hash", hash, "error", cacheErr)
+				}
+			}
 			return resp, nil
 		}
 
@@ -203,13 +222,30 @@ func (c *Client) GetNetworkName() string {
 }
 
 // GetLedgerHeader fetches ledger header details for a specific sequence with automatic fallback.
+// Ledger headers are immutable after they close; a cached copy is served
+// immediately without any RPC call.
 func (c *Client) GetLedgerHeader(ctx context.Context, sequence uint32) (*LedgerHeaderResponse, error) {
+	// Cache check — ledger headers are immutable once closed.
+	if c.CacheEnabled {
+		if cached, ok, err := GetLedgerHeader(c.GetNetworkName(), sequence); ok {
+			logger.Logger.Debug("Ledger header served from cache", "sequence", sequence, "network", c.GetNetworkName())
+			return cached, nil
+		} else if err != nil {
+			logger.Logger.Warn("Cache read error for ledger header", "sequence", sequence, "error", err)
+		}
+	}
+
 	attempts := c.endpointAttempts()
 	var failures []NodeFailure
 	for attempt := 0; attempt < attempts; attempt++ {
 		resp, err := c.getLedgerHeaderAttempt(ctx, sequence)
 		if err == nil {
 			c.markSuccess(c.HorizonURL)
+			if c.CacheEnabled {
+				if cacheErr := SetLedgerHeader(c.GetNetworkName(), sequence, resp); cacheErr != nil {
+					logger.Logger.Warn("Failed to cache ledger header", "sequence", sequence, "error", cacheErr)
+				}
+			}
 			return resp, nil
 		}
 
