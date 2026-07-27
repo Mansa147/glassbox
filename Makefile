@@ -7,6 +7,7 @@
 .PHONY: reproducibility-check
 .PHONY: license-scan
 .PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install
+.PHONY: changelog-check changelog-generate changelog-dry-run
 
 # Build variables
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -79,8 +80,27 @@ ts-build:
 	npm run build
 	@echo "TypeScript artifacts built in dist/"
 
+# ──────────────────────────────────────────────
+# Changelog management
+# ──────────────────────────────────────────────
+
+# Validate all pending changelog fragments (run in CI on every PR).
+# Exits non-zero if any fragment is malformed or has a duplicate PR number.
+changelog-check:
+	@bash scripts/validate-fragments.sh
+
+# Preview the generated release section without writing any files.
+changelog-dry-run:
+	@bash scripts/generate-changelog.sh --dry-run
+
+# Generate CHANGELOG.md from all pending fragments and prepend the new section.
+# Set VERSION to override the auto-detected git tag:
+#   make changelog-generate VERSION=v1.3.0
+changelog-generate: changelog-check
+	@bash scripts/generate-changelog.sh $(if $(VERSION),--version $(VERSION),)
+
 # Build all release targets
-release: release-linux release-darwin release-windows ts-build
+release: changelog-check release-linux release-darwin release-windows ts-build
 	@echo "All release targets built"
 
 # ──────────────────────────────────────────────
