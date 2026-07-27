@@ -187,3 +187,13 @@ __snapshots__/
 .glassbox_write_probe
 internal/simulator/perf_baseline_*.json
 !internal/simulator/perf_baseline.json
+
+# --- License scan reports (generated, never committed) ---
+license-reports/
+
+# --- Reproducibility check temp dirs ---
+dist/build1/
+dist/build2/
+
+# --- Mutation test reports ---
+mutation-report/

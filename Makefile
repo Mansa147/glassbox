@@ -3,6 +3,9 @@
 .PHONY: build test lint validate-errors clean bench bench-rpc bench-sim bench-replay bench-sourcemap bench-profile bench-perf-regression
 .PHONY: fmt fmt-go fmt-rust pre-commit
 .PHONY: release release-linux release-darwin release-windows package verify-release ts-build
+.PHONY: manifest-sign manifest-verify
+.PHONY: reproducibility-check
+.PHONY: license-scan
 .PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install
 
 # Build variables
@@ -11,19 +14,43 @@ COMMIT_SHA?=$(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE?=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")
 DIST_DIR?=dist/release
 
-# Go build flags — inject version metadata at link time
+# ── Reproducible builds ────────────────────────────────────────────────────
+# SOURCE_DATE_EPOCH is the Unix timestamp of the HEAD commit.  All archive
+# tools (tar, zip) clamp file modification times to this value so that two
+# builds from the same source produce byte-identical archives regardless of
+# when they are run.
+#
+# The variable is exported so child processes (cargo, npm, zip wrappers)
+# inherit it automatically.
+#
+# Reference: https://reproducible-builds.org/docs/source-date-epoch/
+SOURCE_DATE_EPOCH?=$(shell git log -1 --format=%ct 2>/dev/null || echo "0")
+export SOURCE_DATE_EPOCH
+
+# Manifest signing variables — override on the command line or via environment.
+# GLASSBOX_MANIFEST_SIGNING_KEY must be set externally (never default here).
+SIGNER_IDENTITY?=ci-pipeline
+KEY_ID?=
+SBOM_REF?=
+
+# Go build flags — inject version metadata at link time.
+# -trimpath removes local file-system paths from the binary so builds on
+# different machines produce identical binaries.
 GO_LDFLAGS=-ldflags "-s -w \
   -X 'github.com/dotandev/glassbox/internal/version.Version=$(VERSION)' \
   -X 'github.com/dotandev/glassbox/internal/version.CommitSHA=$(COMMIT_SHA)' \
   -X 'github.com/dotandev/glassbox/internal/version.BuildDate=$(BUILD_DATE)'"
 
+# -trimpath is added separately so it appears before -ldflags in the command.
+GO_BUILD_FLAGS=-trimpath $(GO_LDFLAGS)
+
 # Build the main binary
 build:
-	go build $(GO_LDFLAGS) -o bin/glassbox ./cmd/glassbox
+	go build $(GO_BUILD_FLAGS) -o bin/glassbox ./cmd/glassbox
 
 # Build for release (optimized, stripped)
 build-release:
-	go build $(GO_LDFLAGS) -o bin/glassbox ./cmd/glassbox
+	go build $(GO_BUILD_FLAGS) -o bin/glassbox ./cmd/glassbox
 
 # ──────────────────────────────────────────────
 # Cross-compilation targets
@@ -31,19 +58,19 @@ build-release:
 
 release-linux:
 	@mkdir -p $(DIST_DIR)
-	GOOS=linux   GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-linux-amd64   ./cmd/glassbox
-	GOOS=linux   GOARCH=arm64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-linux-arm64   ./cmd/glassbox
+	GOOS=linux   GOARCH=amd64  CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/glassbox-linux-amd64   ./cmd/glassbox
+	GOOS=linux   GOARCH=arm64  CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/glassbox-linux-arm64   ./cmd/glassbox
 	@echo "Linux binaries built in $(DIST_DIR)"
 
 release-darwin:
 	@mkdir -p $(DIST_DIR)
-	GOOS=darwin  GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-darwin-amd64  ./cmd/glassbox
-	GOOS=darwin  GOARCH=arm64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-darwin-arm64  ./cmd/glassbox
+	GOOS=darwin  GOARCH=amd64  CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/glassbox-darwin-amd64  ./cmd/glassbox
+	GOOS=darwin  GOARCH=arm64  CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/glassbox-darwin-arm64  ./cmd/glassbox
 	@echo "macOS binaries built in $(DIST_DIR)"
 
 release-windows:
 	@mkdir -p $(DIST_DIR)
-	GOOS=windows GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-windows-amd64.exe ./cmd/glassbox
+	GOOS=windows GOARCH=amd64  CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/glassbox-windows-amd64.exe ./cmd/glassbox
 	@echo "Windows binary built in $(DIST_DIR)"
 
 # Build TypeScript/Node artifacts
@@ -61,28 +88,35 @@ release: release-linux release-darwin release-windows ts-build
 # ──────────────────────────────────────────────
 
 # Produce per-binary SHA-256 checksums and zip/tar archives.
+# Archives are reproducible: file timestamps are clamped to SOURCE_DATE_EPOCH,
+# entries are sorted, and owner/group fields are normalised.
 # Requires: sha256sum (Linux) or shasum -a 256 (macOS), zip, tar.
 package: release
-	@echo "Packaging release artifacts..."
+	@echo "Packaging release artifacts (SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH))..."
 	@cd $(DIST_DIR) && \
 	  for f in glassbox-linux-* glassbox-darwin-* glassbox-windows-*; do \
 	    [ -f "$$f" ] || continue; \
 	    echo "  archiving $$f"; \
 	    case "$$f" in \
-	      *.exe) zip "$$f.zip" "$$f" ;; \
-	      *)     tar czf "$$f.tar.gz" "$$f" ;; \
+	      *.exe) \
+	        zip --no-dir-entries -X -9 "$${f%.exe}.zip" "$$f" ;; \
+	      *) \
+	        tar --sort=name \
+	            --owner=0 --group=0 --numeric-owner \
+	            --mtime="@$(SOURCE_DATE_EPOCH)" \
+	            -czf "$${f}.tar.gz" "$$f" ;; \
 	    esac; \
 	  done
 	@echo "  generating checksums..."
 	@cd $(DIST_DIR) && \
 	  if command -v sha256sum >/dev/null 2>&1; then \
-	    sha256sum *.tar.gz *.zip 2>/dev/null > checksums.sha256 || true; \
+	    sha256sum *.tar.gz *.zip 2>/dev/null | LC_ALL=C sort > checksums.sha256 || true; \
 	  else \
-	    shasum -a 256 *.tar.gz *.zip 2>/dev/null > checksums.sha256 || true; \
+	    shasum -a 256 *.tar.gz *.zip 2>/dev/null | LC_ALL=C sort > checksums.sha256 || true; \
 	  fi
 	@echo "  writing version metadata..."
-	@printf 'version=%s\ncommit=%s\nbuild_date=%s\n' \
-	  "$(VERSION)" "$(COMMIT_SHA)" "$(BUILD_DATE)" > $(DIST_DIR)/version.txt
+	@printf 'version=%s\ncommit=%s\nbuild_date=%s\nsource_date_epoch=%s\n' \
+	  "$(VERSION)" "$(COMMIT_SHA)" "$(BUILD_DATE)" "$(SOURCE_DATE_EPOCH)" > $(DIST_DIR)/version.txt
 	@echo "Package complete. Artifacts in $(DIST_DIR):"
 	@ls -lh $(DIST_DIR)
 
@@ -93,6 +127,67 @@ verify-release:
 # Check binary sizes against thresholds
 size-check:
 	@bash scripts/check_binary_size.sh
+
+# ──────────────────────────────────────────────
+# Signed release manifest
+#
+# manifest-sign  — generate and sign dist/release/manifest.json.
+#   Requires GLASSBOX_MANIFEST_SIGNING_KEY to be set to a PKCS#8 PEM
+#   Ed25519 private key (literal PEM text or a file path).
+#   The private key is NEVER written to disk or embedded in the manifest.
+#
+#   Usage:
+#     GLASSBOX_MANIFEST_SIGNING_KEY="$(cat ./release-key.pem)" make manifest-sign
+#     GLASSBOX_MANIFEST_SIGNING_KEY=/path/to/key.pem make manifest-sign
+#
+#   Optional overrides (defaults come from git):
+#     VERSION COMMIT_SHA BUILD_DATE SIGNER_IDENTITY KEY_ID SBOM_REF
+#
+# manifest-verify — offline verification of dist/release/manifest.json.
+#   Requires python3 + the 'cryptography' package for Ed25519 verification.
+#   All other checks (presence, SHA-256, no-unlisted) need only bash + python3.
+# ──────────────────────────────────────────────
+
+manifest-sign: package
+	@if [ -z "$(GLASSBOX_MANIFEST_SIGNING_KEY)" ]; then \
+	  echo "ERROR: GLASSBOX_MANIFEST_SIGNING_KEY is not set."; \
+	  echo "       Set it to a PKCS#8 PEM Ed25519 private key (file path or literal PEM)."; \
+	  exit 1; \
+	fi
+	@VERSION="$(VERSION)" COMMIT_SHA="$(COMMIT_SHA)" BUILD_DATE="$(BUILD_DATE)" \
+	  SIGNER_IDENTITY="$(SIGNER_IDENTITY)" KEY_ID="$(KEY_ID)" SBOM_REF="$(SBOM_REF)" \
+	  bash scripts/sign-manifest.sh $(DIST_DIR)
+
+manifest-verify:
+	@bash scripts/verify-manifest.sh $(DIST_DIR)/manifest.json $(DIST_DIR)
+
+# ──────────────────────────────────────────────
+# Reproducibility check
+#
+# Builds glassbox-linux-amd64 twice in isolated temp directories from the
+# same SOURCE_DATE_EPOCH, then compares SHA-256 hashes.  A mismatch means
+# some build input is non-deterministic.
+#
+# Usage:
+#   make reproducibility-check
+#   make reproducibility-check SOURCE_DATE_EPOCH=1700000000
+# ──────────────────────────────────────────────
+
+reproducibility-check:
+	@bash scripts/check-reproducibility.sh
+
+# ──────────────────────────────────────────────
+# License scanning
+#
+# Scans Go, Rust, and Node dependencies against the policy in
+# license-policy.json and fails on violations.
+#
+# Usage:
+#   make license-scan
+# ──────────────────────────────────────────────
+
+license-scan:
+	@bash scripts/check-licenses.sh
 
 # Run tests
 test:

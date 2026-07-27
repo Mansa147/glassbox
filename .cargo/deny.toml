@@ -1,0 +1,128 @@
+# .cargo/deny.toml
+# Copyright 2026 Glassbox Users
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-deny configuration for the Glassbox Rust simulator.
+# Policy mirrors license-policy.json — keep them in sync.
+#
+# Run locally:
+#   cargo install cargo-deny --locked
+#   cargo deny --manifest-path simulator/Cargo.toml check
+#
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Analyse the full dependency graph including dev-dependencies so vulnerability
+# findings in test helpers are visible (they can be downgraded to warnings below).
+targets = [
+  { triple = "x86_64-unknown-linux-musl" },
+  { triple = "aarch64-unknown-linux-musl" },
+]
+# Exclude the workspace root (glassbox is a Go project; only the simulator crate matters).
+exclude = []
+no-default-features = false
+
+# ── Licenses ──────────────────────────────────────────────────────────────────
+[licenses]
+# Confidence threshold for license text matching via SPDX expression parser.
+# Values below this confidence level are treated as unlicensed (fail by default).
+confidence-threshold = 0.8
+
+# Licenses that are unconditionally allowed.
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "CC0-1.0",
+  "Unlicense",
+  "0BSD",
+  "Unicode-DFS-2016",  # Unicode data files included in Rust std
+  "Zlib",              # compression libs
+  "OpenSSL",           # OpenSSL is allowed for linking (not redistribution of source)
+]
+
+# Licenses that are unconditionally denied.
+deny = [
+  "GPL-2.0",
+  "GPL-2.0-only",
+  "GPL-2.0-or-later",
+  "GPL-3.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "AGPL-1.0",
+  "AGPL-3.0",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+  "LGPL-2.0",
+  "LGPL-2.1",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "LGPL-3.0",
+  "LGPL-3.0-only",
+  "LGPL-3.0-or-later",
+  "SSPL-1.0",
+  "BUSL-1.1",
+  "OSL-3.0",
+  "CPAL-1.0",
+]
+
+# Crates whose license cannot be determined automatically and have been manually
+# reviewed. Add entries here instead of lowering confidence-threshold globally.
+exceptions = [
+  # { name = "some-crate", version = "=1.0.0", allow = ["LicenseRef-Custom"] },
+]
+
+# ── Advisories (vulnerability scanning) ───────────────────────────────────────
+[advisories]
+# RustSec advisory database. cargo-deny fetches it automatically during CI.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Findings at CRITICAL or HIGH severity fail the build.
+# MEDIUM and LOW emit warnings (visible in CI output but do not block).
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+notice = "warn"
+
+# Ignore specific advisories that have been reviewed and accepted.
+# Each entry must have an expiry date no more than 90 days out.
+# Format: { id = "RUSTSEC-YYYY-NNNN", reason = "...", expires = "YYYY-MM-DD" }
+ignore = [
+  # Example (disabled):
+  # { id = "RUSTSEC-2023-0001", reason = "No upstream fix; attack surface not reachable via our API", expires = "2026-10-01" },
+]
+
+# ── Bans (duplicate / unwanted crates) ────────────────────────────────────────
+[bans]
+# Warn when multiple versions of the same crate are in the tree. Duplicates
+# inflate binary size and can cause subtle incompatibilities.
+multiple-versions = "warn"
+
+# Deny specific crates regardless of license (known problematic or superseded).
+deny = [
+  # { name = "openssl", reason = "use rustls instead" },
+]
+
+# Packages that are allowed to appear multiple times (e.g. syn, proc-macro2
+# which are commonly duplicated across the ecosystem).
+skip = [
+  { name = "windows-sys" },
+  { name = "windows_x86_64_gnu" },
+  { name = "windows_x86_64_msvc" },
+  { name = "windows_aarch64_msvc" },
+  { name = "windows_i686_gnu" },
+  { name = "windows_i686_msvc" },
+]
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+[sources]
+# Only allow crates from crates.io and the official RustSec mirror.
+# Reject git dependencies and path dependencies outside the workspace.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
