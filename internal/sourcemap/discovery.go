@@ -62,6 +62,9 @@ func CheckHashMismatch(path, onChainHash string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read WASM file %q: %w", path, err)
 	}
+	if len(content) < 8 || content[0] != 0x00 || content[1] != 0x61 || content[2] != 0x73 || content[3] != 0x6d {
+		return fmt.Errorf("not a valid WASM binary: %q does not start with WASM magic bytes", path)
+	}
 	sum := sha256.Sum256(content)
 	local := hex.EncodeToString(sum[:])
 	if local != onChainHash {

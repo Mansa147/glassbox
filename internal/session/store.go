@@ -310,10 +310,28 @@ func (s *Store) SaveWithValidation(ctx context.Context, data *Data) error {
 // the full integrity-report formatting. Prefer SaveWithValidation when the
 // caller cannot guarantee the Data has already been validated externally.
 func (s *Store) Save(ctx context.Context, data *Data) error {
+	if data == nil {
+		return fmt.Errorf("session data must not be nil")
+	}
 	if data.ID == "" {
 		return fmt.Errorf("session ID is required")
 	}
 	if data.TxHash == "" {
+		return fmt.Errorf("session TxHash is required")
+	}
+	if data.Network == "" {
+		return fmt.Errorf("session network is required")
+	}
+	validNetworks := map[string]bool{"testnet": true, "mainnet": true, "futurenet": true}
+	if !validNetworks[data.Network] {
+		return fmt.Errorf("session network %q is invalid: accepted values are testnet, mainnet, futurenet", data.Network)
+	}
+	if data.Status == "" {
+		return fmt.Errorf("session status is required")
+	}
+	validStatuses := map[string]bool{"active": true, "saved": true, "resumed": true, "recovered": true, "expired": true}
+	if !validStatuses[data.Status] {
+		return fmt.Errorf("session status %q is invalid: accepted values are active, saved, resumed, recovered, expired", data.Status)
 		return fmt.Errorf(
 			"session transaction hash is required\n" +
 				"  Fix: run 'glassbox debug <tx-hash>' to create a session with a valid transaction hash",

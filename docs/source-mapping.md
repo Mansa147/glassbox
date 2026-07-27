@@ -68,6 +68,16 @@ The `--contract-source` path is validated before any network or simulator work b
 
 Each error includes a remediation hint so you know exactly what to fix.
 
+### WASM binary validation
+
+When checking hash mismatches, Glassbox validates that the local file is a valid WASM binary before computing its hash. Files that do not start with the WASM magic bytes (`\0asm`) produce a clear error:
+
+```
+not a valid WASM binary: "<path>" does not start with WASM magic bytes
+```
+
+This catches corrupted or non-WASM files early, before the hash comparison step.
+
 ### How it works
 
 - When `--contract-source <path>` is set and automatic source resolution fails,
