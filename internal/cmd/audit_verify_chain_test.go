@@ -62,13 +62,7 @@ func writePrevHashIntoLog(t *testing.T, path, prevHash string) {
 	require.NoError(t, os.WriteFile(path, out, 0600))
 }
 
-func resetAuditVerifyFlags() {
-	auditVerifyFile = ""
-	auditVerifyPublicKey = ""
-	auditVerifySchema = ""
-	auditVerifyJSON = false
-	auditVerifyPreviousHash = ""
-}
+
 
 func TestValidateAuditVerifyInputs(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(nil)

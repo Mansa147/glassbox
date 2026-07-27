@@ -163,12 +163,24 @@ export function registerAuditCommands(program: Command): void {
     .option("--sig <hex>", "Hex-encoded signature")
     .option("--pubkey <pem>", "Public key in PEM format")
     .option("--file <path>", "Path to a complete audit log JSON file")
+    .option("--trust-roots <pathOrPem>", "Path to trust store PEM or root cert PEM string")
+    .option("--allowed-issuers <issuers>", "Comma-separated list of allowed certificate issuers")
+    .option("--check-validity", "Enforce certificate validity window (expiration) checks")
+    .option("--revoked-certs <serialsOrPath>", "Comma-separated list or file path of revoked cert serials")
+    .option("--policy-config <path>", "Path to a JSON file containing trust policy configuration")
+    .option("--json", "Emit complete verification and policy result as JSON")
     .action(
       async (opts: {
         payload?: string;
         sig?: string;
         pubkey?: string;
         file?: string;
+        trustRoots?: string;
+        allowedIssuers?: string;
+        checkValidity?: boolean;
+        revokedCerts?: string;
+        policyConfig?: string;
+        json?: boolean;
       }) => {
         try {
           let auditLog: any;
@@ -193,9 +205,83 @@ export function registerAuditCommands(program: Command): void {
             );
           }
 
-          const isValid = verifyAuditLog(auditLog);
+          const trustPolicy: TrustPolicy = {};
 
-          if (isValid) {
+          if (opts.policyConfig) {
+            const content = fs.readFileSync(opts.policyConfig, "utf8");
+            Object.assign(trustPolicy, JSON.parse(content));
+          }
+
+          if (opts.trustRoots) {
+            if (fs.existsSync(opts.trustRoots)) {
+              trustPolicy.trustRoots = [fs.readFileSync(opts.trustRoots, "utf8")];
+            } else {
+              trustPolicy.trustRoots = [opts.trustRoots];
+            }
+          }
+
+          if (opts.allowedIssuers) {
+            trustPolicy.allowedIssuers = opts.allowedIssuers.split(",").map((s) => s.trim());
+          }
+
+          if (opts.checkValidity) {
+            trustPolicy.checkValidity = true;
+          }
+
+          if (opts.revokedCerts) {
+            if (fs.existsSync(opts.revokedCerts)) {
+              trustPolicy.revokedCertificates = fs.readFileSync(opts.revokedCerts, "utf8")
+                .split("\n")
+                .map((s) => s.trim())
+                .filter(Boolean);
+            } else {
+              trustPolicy.revokedCertificates = opts.revokedCerts.split(",").map((s) => s.trim());
+            }
+          }
+
+          const hasPolicy = Object.keys(trustPolicy).length > 0;
+          const result = verifyAuditLogDetailed(auditLog, opts.pubkey, hasPolicy ? trustPolicy : undefined);
+
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+            if (!result.valid) {
+              process.exit(1);
+            }
+            return;
+          }
+
+          if (result.hash_valid) {
+            console.log("[OK] Hash integrity verified.");
+          } else {
+            console.error("[FAIL] Hash mismatch: payload has been tampered with.");
+          }
+
+          if (result.signature_valid) {
+            console.log("[OK] Signature verified.");
+          } else {
+            console.error("[FAIL] Signature verification failed.");
+          }
+
+          if (result.attestation) {
+            if (result.attestation.chain_valid) {
+              console.log("[OK] Hardware attestation chain verified.");
+            } else {
+              console.error(`[FAIL] Hardware attestation chain invalid: ${result.attestation.issues.join(", ")}`);
+            }
+          }
+
+          if (result.policy) {
+            if (result.policy.valid) {
+              console.log("[OK] Trust policy evaluation passed.");
+            } else {
+              if (result.policy.untrusted_issuers.length > 0) {
+                console.error(`[FAIL] Untrusted issuer(s) identified: ${result.policy.untrusted_issuers.join(", ")}`);
+              }
+              console.error(`[FAIL] Trust policy issues: ${result.policy.issues.join("; ")}`);
+            }
+          }
+
+          if (result.valid) {
             console.log(
               "[OK] Verification successful: Signature and integrity verified.",
             );
@@ -217,3 +303,4 @@ export function registerAuditCommands(program: Command): void {
       },
     );
 }
+
