@@ -211,29 +211,39 @@ func (s *Server) GetContractCode(r *http.Request, req *GetContractCodeRequest, r
 
 // Start starts the JSON-RPC server
 func (s *Server) Start(ctx context.Context, port string) error {
-	server := rpc.NewServer()
-	server.RegisterCodec(json2.NewCodec(), "application/json")
-	server.RegisterCodec(json2.NewCodec(), "application/json;charset=UTF-8")
+	rpcServer := rpc.NewServer()
+	rpcServer.RegisterCodec(json2.NewCodec(), "application/json")
+	rpcServer.RegisterCodec(json2.NewCodec(), "application/json;charset=UTF-8")
 
-	if err := server.RegisterService(s, ""); err != nil {
+	if err := rpcServer.RegisterService(s, ""); err != nil {
 		return errors.WrapValidationError(fmt.Sprintf("failed to register service: %v", err))
 	}
 
-	http.Handle("/rpc", server)
+	// Use a dedicated mux so we don't pollute the global http.DefaultServeMux.
+	mux := http.NewServeMux()
+	mux.Handle("/rpc", rpcServer)
 
-	// Health check endpoint
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// Legacy /health endpoint for backwards compatibility.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// Structured health endpoints (liveness, readiness, aggregate status).
+	checker := NewHealthChecker()
+	checker.WithSimulatorProbe(DefaultSimulatorProbe(func() bool {
+		return s.simulator != nil
+	}))
+	RegisterHealthRoutes(mux, checker)
+
 	// Prometheus metrics endpoint
-	http.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.Handler())
 
 	logger.Logger.Info("Starting JSON-RPC server", "port", port)
 
 	srv := &http.Server{
-		Addr: ":" + port,
+		Addr:    ":" + port,
+		Handler: mux,
 	}
 
 	// Start server in goroutine
@@ -243,8 +253,9 @@ func (s *Server) Start(ctx context.Context, port string) error {
 		}
 	}()
 
-	// Wait for context cancellation
+	// Wait for context cancellation; signal readiness probe before shutdown begins.
 	<-ctx.Done()
+	checker.MarkShuttingDown()
 	logger.Logger.Info("Shutting down JSON-RPC server")
 	return srv.Shutdown(context.Background())
 }
