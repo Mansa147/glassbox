@@ -37,6 +37,8 @@ func TestFallbackMapper_Resolve_StrippedBinary_ReturnsUnknown(t *testing.T) {
 
 	require.NotNil(t, result)
 	assert.Equal(t, MappingQualityUnknown, result.Quality)
+	assert.Equal(t, ConfidenceUnknown, result.Confidence)
+	assert.Equal(t, MatchUnknown, result.MatchKind)
 	assert.NotEmpty(t, result.Warning, "should emit a warning for stripped binary")
 	assert.Contains(t, result.Warning, "no DWARF debug info")
 }
@@ -74,6 +76,10 @@ version = "0.1.0"
 
 	require.NotNil(t, result)
 	assert.Equal(t, MappingQualityHeuristic, result.Quality)
+	assert.Equal(t, MatchHeuristic, result.MatchKind)
+	assert.Equal(t, ConfidenceHeuristicCargo, result.Confidence)
+	assert.True(t, result.Evidence.Heuristic)
+	assert.Equal(t, LinkCandidate, result.LinkPresentation)
 	assert.Contains(t, result.File, "lib.rs")
 	assert.NotEmpty(t, result.Warning)
 	assert.Contains(t, result.Warning, "Cargo manifest fallback")
@@ -312,6 +318,8 @@ func TestFallbackMapper_Deterministic(t *testing.T) {
 	require.NotNil(t, r2)
 	assert.Equal(t, r1.File, r2.File)
 	assert.Equal(t, r1.Quality, r2.Quality)
+	assert.Equal(t, r1.Confidence, r2.Confidence)
+	assert.Equal(t, r1.MatchKind, r2.MatchKind)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

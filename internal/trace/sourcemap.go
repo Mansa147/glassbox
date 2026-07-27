@@ -89,8 +89,8 @@ func MergeDebugSymbols(expectedContractID string) error {
 					file.Path, readErr)
 			}
 
-			mapper := sourcemap.NewFallbackMapper("")
-			result := mapper.Resolve(content, 0)
+			resolver := sourcemap.NewMappingResolver("", nil)
+			result := resolver.Resolve(content, 0)
 
 			if result.Quality == sourcemap.MappingQualityUnknown {
 				return fmt.Errorf(
@@ -105,7 +105,18 @@ func MergeDebugSymbols(expectedContractID string) error {
 			logger.Logger.Info("Successfully merged DWARF debug symbols",
 				"file", filepath.Base(file.Path),
 				"contract_id", expectedContractID[:16]+"...",
-				"quality", result.Quality.String())
+				"quality", result.Quality.String(),
+				"confidence", result.Confidence,
+				"match_kind", result.MatchKind)
+
+			if summary := result.UserSummary(); summary != "" {
+				fmt.Fprintf(os.Stderr, "  Source mapping: %s\n", summary)
+			}
+			if result.SourceLink != "" {
+				fmt.Fprintf(os.Stderr, "  Source link: %s\n", result.SourceLink)
+			} else if result.CandidateLink != "" {
+				fmt.Fprintf(os.Stderr, "  Candidate source link: %s\n", result.CandidateLink)
+			}
 
 			if result.Warning != "" {
 				logger.Logger.Warn("Source mapping used fallback path",
