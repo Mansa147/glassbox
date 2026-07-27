@@ -143,8 +143,9 @@ func getVersion() string {
 
 // getFeatureFlags returns a list of enabled feature flags.
 // Only non-sensitive, user-facing flags are included.
+// Always returns a non-nil slice (may be empty).
 func getFeatureFlags() []string {
-	var flags []string
+	flags := make([]string, 0)
 
 	// Check for optional features that are enabled
 	// These are intentionally limited to avoid exposing sensitive data
@@ -164,9 +165,29 @@ func getFeatureFlags() []string {
 	return flags
 }
 
+// IsTelemetryEnabled returns the current effective telemetry enabled state using
+// the consent resolution hierarchy:
+//
+//  1. GLASSBOX_TELEMETRY environment variable (takes highest precedence)
+//  2. ~/.Glassbox/telemetry_consent.json consent file
+//  3. Runtime flag set via Init() (for backwards-compat with --telemetry flag)
+//  4. Default: disabled
+//
+// This is the single authoritative check used by RecordCommandUsage and
+// should be used wherever code needs to decide whether to emit telemetry.
+func IsTelemetryEnabled() bool {
+	ec := ResolveConsent()
+	// Env or consent file takes precedence over the runtime flag.
+	if ec.Source != ConsentSourceDefault {
+		return ec.Enabled
+	}
+	// Fall back to the runtime flag set during Init().
+	return commandTelemetryEnabled
+}
+
 // RecordCommandUsage emits a lightweight command usage event with environment metadata.
 func RecordCommandUsage(ctx context.Context, command string) {
-	if !commandTelemetryEnabled {
+	if !IsTelemetryEnabled() {
 		return
 	}
 
