@@ -10,6 +10,7 @@ import { AuditLogger } from "../audit/AuditLogger";
 import { renderAuditHTML, writeAuditReport } from "../audit/AuditRenderer";
 import { createAuditSigner } from "../audit/signing/factory";
 import { verifyAuditLog } from "../audit/AuditVerifier";
+import { ExitCode } from "../exit-codes";
 
 // Load env for key/provider configuration
 dotenv.config();
@@ -63,64 +64,68 @@ export function registerAuditCommands(program: Command): void {
       kmsSigningAlgorithm?: string;
       dryRun?: boolean;
     }) => {
+      let trace: unknown;
       try {
-        let trace;
-        try {
-          trace = JSON.parse(opts.payload);
-        } catch (_jsonErr) {
-          console.error('[FAIL] audit signing failed: --payload is not valid JSON.');
-          console.error('       Ensure the value is a valid JSON string, e.g.:');
-          console.error('         --payload (JSON with input, state, events, timestamp fields)');
-          process.exit(1);
-        }
+        trace = JSON.parse(opts.payload);
+      } catch {
+        console.error('[FAIL] audit signing failed: --payload is not valid JSON.');
+        console.error('       Ensure the value is a valid JSON string, e.g.:');
+        console.error('         --payload (JSON with input, state, events, timestamp fields)');
+        process.exit(ExitCode.VALIDATION_ERROR);
+        return;
+      }
 
-        const signer = createAuditSigner({
+      const providerLabel = opts.hsmProvider ?? 'software';
+      let signer: any = null;
+
+      try {
+        signer = createAuditSigner({
           hsmProvider: opts.hsmProvider,
           softwarePrivateKeyPem: opts.softwarePrivateKey ?? process.env.GLASSBOX_AUDIT_PRIVATE_KEY_PEM,
           kmsKeyId: opts.kmsKeyId,
           kmsSigningAlgorithm: opts.kmsSigningAlgorithm,
         });
 
-          const logger = new AuditLogger(signer, providerLabel);
-          const log = await logger.generateLog(trace);
-
-          // Print to stdout so callers can redirect to a file
-          process.stdout.write(JSON.stringify(log, null, 2) + "\n");
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          console.error(`[FAIL] audit signing failed: ${msg}`);
-          process.exit(1);
-        } finally {
-          if (signer && typeof signer.close === "function") {
-            try {
-              await signer.close();
-            } catch (closeError) {
-              const msg =
-                closeError instanceof Error
-                  ? closeError.message
-                  : String(closeError);
-              console.error(`[WARN] audit signing cleanup failed: ${msg}`);
-            }
-          }
+        if (opts.dryRun) {
+          const canonical = stringify(trace);
+          const canonicalHash = createHash('sha256').update(canonical as string).digest('hex');
+          process.stdout.write(JSON.stringify({
+            dry_run: true,
+            signer_provider: providerLabel,
+            canonical_hash: canonicalHash,
+          }, null, 2) + '\n');
+          return;
         }
 
         const logger = new AuditLogger(signer, providerLabel);
-        const log = await logger.generateLog(trace);
-
-        // Print to stdout so callers can redirect to a file
+        const log = await logger.generateLog(trace as import('../audit/AuditLogger').ExecutionTrace);
         process.stdout.write(JSON.stringify(log, null, 2) + '\n');
+
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`[FAIL] audit signing failed: ${msg}`);
         if (msg.includes('schema validation failed')) {
           console.error('       Fix the payload fields listed above and retry.');
           console.error('       Required fields: timestamp (ISO 8601), input (object), state (object), events (array).');
+          process.exit(ExitCode.VALIDATION_ERROR);
         } else if (msg.includes('private key') || msg.includes('GLASSBOX_AUDIT_PRIVATE_KEY_PEM')) {
           console.error('       Set the GLASSBOX_AUDIT_PRIVATE_KEY_PEM environment variable or pass --software-private-key.');
+          process.exit(ExitCode.CONFIGURATION_ERROR);
         } else if (msg.includes('KMS') || msg.includes('kms')) {
           console.error('       Check GLASSBOX_KMS_KEY_ID and AWS_REGION environment variables.');
+          process.exit(ExitCode.CONFIGURATION_ERROR);
+        } else {
+          process.exit(ExitCode.UNKNOWN_ERROR);
         }
-        process.exit(1);
+      } finally {
+        if (signer && typeof signer.close === 'function') {
+          try {
+            await signer.close();
+          } catch (closeError) {
+            const msg = closeError instanceof Error ? closeError.message : String(closeError);
+            console.error(`[WARN] audit signing cleanup failed: ${msg}`);
+          }
+        }
       }
     });
 
@@ -180,7 +185,7 @@ export function registerAuditCommands(program: Command): void {
 
             const canonicalString = stringify(auditLog.trace);
             auditLog.hash = createHash("sha256")
-              .update(canonicalString)
+              .update(canonicalString as string)
               .digest("hex");
           } else {
             throw new Error(
@@ -198,12 +203,16 @@ export function registerAuditCommands(program: Command): void {
             console.error(
               "[FAIL] Verification failed: Invalid signature or tampered payload.",
             );
-            process.exit(1);
+            process.exit(ExitCode.SECURITY_ERROR);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           console.error(`[FAIL] audit verification failed: ${msg}`);
-          process.exit(1);
+          if (msg.includes('You must provide either')) {
+            process.exit(ExitCode.VALIDATION_ERROR);
+          } else {
+            process.exit(ExitCode.UNKNOWN_ERROR);
+          }
         }
       },
     );

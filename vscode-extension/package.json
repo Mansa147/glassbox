@@ -61,7 +61,9 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
-    "test:unit": "npm run compile && node --test out/traceExport.test.js"
+    "test:unit": "npm run compile && node --test out/traceExport.test.js",
+    "test:extension": "npm run compile && node --test out/extension.spec.js",
+    "test:integration": "node --import tsx --test src/extension.spec.ts"
   },
   "dependencies": {
     "vscode-jsonrpc": "^8.2.1"
