@@ -168,6 +168,18 @@ bench-perf-regression:
 	@go test -v -run 'TestPerfRegression' ./internal/simulator/...
 	@echo " Performance regression tests passed"
 
+# Run performance budget validation
+bench-budget:
+	@echo "Running performance budget validation..."
+	@go test -v -run 'TestBudget\|TestLoadPerformance\|TestCheckBudget\|TestTraceSize' ./internal/perfmetrics/...
+	@echo " Performance budget validation passed"
+
+# Run race-condition tests for event bus
+test-race:
+	@echo "Running race-condition tests..."
+	@go test -race -v -run 'TestRace\|TestConcurrent' ./internal/eventbus/...
+	@echo " Race-condition tests passed"
+
 # Rust simulator targets
 .PHONY: rust-lint rust-lint-strict rust-test rust-build
 

@@ -99,6 +99,7 @@ commit_309*.next
 !package-lock.json
 !tsconfig*.json
 !perf_baseline.json
+!performance_budgets.json
 
 # --- Issue PR notes (local only) ---
 PR_270_improve_trace_export_session_recovery_integrity.md
