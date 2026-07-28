@@ -50,6 +50,10 @@ var (
 	secretScanModeFlag       string
 	secretScanOverrideFlag   []string
 
+	// Secret scanning flags
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
+
 	// eventSchemas is optionally populated by other subsystems (e.g. schema
 	// loading) before the trace command runs. Nil is safe — PrintExecutionTrace
 	// handles the absence gracefully.
@@ -802,6 +806,10 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceShowTimingFlag, "show-timing", false, "Print load, render, and export timing to stderr")
 	traceCmd.Flags().BoolVar(&traceTimingsFlag, "timings", false, "Print per-phase timing breakdown to stderr after the operation completes")
 	traceCmd.Flags().StringVar(&traceVerifyExportFlag, "verify-export", "", "Verify integrity of an existing export file (checksum, step count, schema version)")
+
+	// Secret scanning flags
+	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	traceCmd.Flags().StringArrayVar(&secretScanOverrideFlag, "secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
 
 	// Secret scanning flags
 	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
