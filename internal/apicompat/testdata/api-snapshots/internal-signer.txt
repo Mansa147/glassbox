@@ -88,6 +88,7 @@ Close
 CloseSession
 Create
 CreateSigner
+DefaultKMSRetryConfig
 DefaultRegistry
 DefaultValidatorConfig
 Description
@@ -95,6 +96,8 @@ DiscoverPKCS11Modules
 Ed25519Verify
 EnvVarDoc
 EnvVars
+ErrContextCancelled
+ErrEmptyMessage
 Error
 Finalize
 FindKey
@@ -102,9 +105,19 @@ GenerateTestKey
 Get
 GetSlotList
 GetTokenInfo
+IdempotencyStats
 InMemorySigner
 Initialize
+KMSClient
+KMSExtraKeyIdempotencyMax
+KMSExtraKeyIdempotencyTTLMs
+KMSExtraKeyInitialBackoffMs
+KMSExtraKeyJitterFraction
+KMSExtraKeyMaxBackoffMs
+KMSExtraKeyMaxRetries
 KMSProvider
+KMSRetryConfig
+KMSSignMetadata
 KMSSigner
 KeyID
 LoadModule
@@ -136,6 +149,7 @@ RegisterOrReplace
 Registry
 Sign
 SignTest
+SignWithMetadata
 Signer
 SignerProvider
 SoftwareProvider

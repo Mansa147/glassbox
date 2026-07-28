@@ -89,7 +89,10 @@ FixtureManifest
 Footprint
 FromSessionMetadata
 Fuzz
+FuzzDecodeDiagnosticEvent
+FuzzDecodeEnvelope
 FuzzXDR
+FuzzXDRSafeUnmarshal
 FuzzerInput
 FuzzingConfig
 FuzzingHarness

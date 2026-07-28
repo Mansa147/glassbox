@@ -22,6 +22,18 @@ AttachEventsToNode
 AttachReviewerComments
 Backspace
 BeginInput
+Bookmark
+BookmarkConflict
+BookmarkConflictPolicy
+BookmarkDangling
+BookmarkImportFail
+BookmarkImportMerge
+BookmarkImportRename
+BookmarkMergeResult
+BookmarkResolution
+BookmarkResolvedByStepID
+BookmarkResolvedExact
+BookmarkStatus
 BoundaryAt
 BoundaryEnter
 BoundaryExit
@@ -69,6 +81,7 @@ DemangleNode
 DemangleTree
 DepthAnalysis
 DepthAnalyzer
+DetectBookmarkConflicts
 DetectCodeArtifactChanges
 DetectFormat
 DetectTrap
@@ -103,6 +116,7 @@ ExportAnnotationFile
 ExportExecutionTrace
 ExportExecutionTraceWithOptions
 ExportJSON
+ExportJSONUnchecked
 ExportMetadata
 ExportOptions
 ExportRecoveryOptions
@@ -117,6 +131,10 @@ FilterMetadataFromTrace
 FilterMode
 FilterModeOff
 FilterModeOn
+FilterSeverityAll
+FilterSeverityError
+FilterSeverityInfo
+FilterSeverityWarning
 FilteredCurrentIndex
 FilteredFlatNodes
 FilteredStepBackward
@@ -137,6 +155,9 @@ FormatTrace
 FormatTraceNode
 FormatTrapInfo
 FromJSON
+FuzzApplyEventSchema
+FuzzParseContractEvent
+FuzzParseEventEnvelope
 FuzzyMatch
 GenerateTraceHTML
 GenerateTraceHTMLWithOptions
@@ -200,6 +221,7 @@ MaxCommentLength
 MaxNavigationHistory
 MaxSourceFileLength
 MaxTraceComments
+MergeBookmarks
 MergeDebugSymbols
 MiddleButton
 MigrateTrace
@@ -213,6 +235,7 @@ NavigateToNextSibling
 NavigateToParentCall
 NavigateToPrevSibling
 NavigatorHistory
+NewBookmark
 NewDepthAnalyzer
 NewExecutionTrace
 NewIncrementalRefresher
@@ -236,6 +259,7 @@ NextStep
 NodeMatch
 Normalize
 OptimizeForDisplay
+ParseBookmarkConflictPolicy
 ParseEventSchemas
 ParseMouseEvent
 ParseSimulationResponse
@@ -276,6 +300,8 @@ RenderTree
 ResolutionOpen
 ResolutionResolved
 ResolutionWontFix
+ResolveBookmark
+ResolveBookmarks
 ResolvedAnnotation
 ReviewerComment
 RightButton
@@ -300,9 +326,7 @@ SelectUp
 SetDetector
 SetNoColor
 SetQuery
-SeverityAll
 SeverityCritical
-SeverityError
 SeverityInfo
 SeverityWarning
 SimulationResponse

@@ -9,6 +9,8 @@ BoundedReader
 BytesRead
 CacheDBName
 CacheDirName
+CacheStats
+CacheStatsSnapshot
 CachedEntry
 CallCount
 CheckStaleness
@@ -74,6 +76,7 @@ GetLatestLedgerSequence
 GetLedgerEntries
 GetLedgerEntriesRequest
 GetLedgerEntriesResponse
+GetLedgerEntry
 GetLedgerHeader
 GetNetworkName
 GetNetworkPassphrase
@@ -83,6 +86,7 @@ HTTPClient
 HashLedgerKey
 HealthCollector
 HealthReport
+ImmutableTTL
 InitCacheWithDB
 Invalidate
 IsDegraded
@@ -168,12 +172,16 @@ Select
 ServerErrorRoute
 Set
 SetCircuitState
+SetLedgerEntry
+SetLedgerHeader
+SetTransaction
 SetWithTTL
 SetWithTTLAndNetwork
 SimulateTransaction
 SimulateTransactionRequest
 SimulateTransactionResponse
 StartMethodTimer
+StatsSnapshot
 Stop
 Stream
 String
