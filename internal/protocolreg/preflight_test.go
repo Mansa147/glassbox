@@ -137,18 +137,22 @@ func TestPreflightCheck_Linux_ConflictDetected(t *testing.T) {
 	}
 	r := newTestRegistrar(t)
 
-	// Write a desktop file pointing to a different binary.
+	// Write a desktop file pointing to a different wrapper path.
 	if err := os.MkdirAll(filepath.Dir(r.linuxDesktopPath()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Dir(r.linuxWrapperPath()), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Write a wrapper script that references a different binary.
 	staleWrapper := "#!/bin/sh\nexec '/other/path/glassbox' protocol-handler \"$1\"\n"
 	if err := os.WriteFile(r.linuxWrapperPath(), []byte(staleWrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	staleDesktop := "[Desktop Entry]\nExec=" + r.linuxWrapperPath() + " %u\n"
+	// Write a desktop file whose Exec line points to a DIFFERENT wrapper path
+	// than r.linuxWrapperPath() to trigger conflict detection.
+	otherWrapper := "/other/path/glassbox-protocol-handler"
+	staleDesktop := "[Desktop Entry]\nExec=" + otherWrapper + " %u\nMimeType=" + linuxMimeType + ";\n"
 	if err := os.WriteFile(r.linuxDesktopPath(), []byte(staleDesktop), 0o644); err != nil {
 		t.Fatal(err)
 	}
