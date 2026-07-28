@@ -42,12 +42,20 @@ type ArchiveOptions struct {
 // for interoperability with generic ZIP tools.
 var SupportedArchiveExtensions = []string{".gbx", ".zip"}
 
-// ValidateArchivePath checks that destPath is non-empty and ends with a
-// supported archive extension. It returns an actionable error when the
-// extension is missing or unsupported.
+// ValidateArchivePath checks that destPath is non-empty, free of null bytes,
+// and ends with a supported archive extension. It returns an actionable error
+// when any of these conditions are not met.
 func ValidateArchivePath(destPath string) error {
 	if strings.TrimSpace(destPath) == "" {
 		return fmt.Errorf("destination path is required")
+	}
+	// Null bytes cannot appear in a valid file path and are a sign of injection.
+	if strings.ContainsRune(destPath, 0) {
+		return fmt.Errorf(
+			"archive path contains null bytes and cannot be used: %q\n"+
+				"  Fix: provide a path without null bytes (e.g. ./session.gbx)",
+			destPath,
+		)
 	}
 	ext := strings.ToLower(filepath.Ext(destPath))
 	for _, supported := range SupportedArchiveExtensions {
@@ -297,6 +305,16 @@ func ImportArchiveWithManifest(srcPath string) (*Data, *ManifestReport, error) {
 			"archive path is required\n" +
 				"  Fix: provide the path to a .gbx archive file\n" +
 				"  Example: glassbox session load ./session.gbx",
+		)
+	}
+
+	// Reject null bytes early — they cannot appear in valid file paths and are
+	// a sign of attempted injection.
+	if strings.ContainsRune(srcPath, 0) {
+		return nil, fmt.Errorf(
+			"archive path contains null bytes and cannot be used: %q\n"+
+				"  Fix: provide a path without null bytes (e.g. ./session.gbx)",
+			srcPath,
 		)
 	}
 
