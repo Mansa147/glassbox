@@ -32,6 +32,15 @@ type Resolver struct {
 	// pipelines or automated environments. When true and all automatic stages
 	// fail, Resolve returns ErrSourceNotFound instead of reading from stdin.
 	nonInteractive bool
+	// buildManifestPath is the explicit path to a glassbox-build-manifest.json
+	// file supplied via --build-manifest. When set it bypasses auto-discovery.
+	buildManifestPath string
+	// buildManifest is the loaded and validated manifest. It is populated
+	// once (lazily or at construction time) and reused for all Resolve calls.
+	buildManifest *BuildManifest
+	// wasmPathForVerification is the local WASM artifact path forwarded from
+	// --wasm so that the manifest's artifact_hash can be verified on load.
+	wasmPathForVerification string
 }
 
 // ErrSourceNotFound is a sentinel returned by Resolve when all discovery
@@ -88,6 +97,26 @@ func WithNonInteractive() ResolverOption {
 	}
 }
 
+// WithBuildManifest sets an explicit path to a glassbox-build-manifest.json
+// file. When supplied the resolver loads and validates the manifest before
+// the first Resolve call and uses it as stage 0 of the discovery pipeline.
+// The manifest's artifact_hash is verified against wasmPath when non-empty.
+func WithBuildManifest(manifestPath, wasmPath string) ResolverOption {
+	return func(r *Resolver) {
+		r.buildManifestPath = manifestPath
+		r.wasmPathForVerification = wasmPath
+	}
+}
+
+// WithBuildManifestLoaded injects an already-parsed BuildManifest directly,
+// skipping file I/O. Useful in tests and when the caller has already called
+// LoadManifestAndVerify.
+func WithBuildManifestLoaded(m *BuildManifest) ResolverOption {
+	return func(r *Resolver) {
+		r.buildManifest = m
+	}
+}
+
 // NewResolver creates a Resolver with the given options.
 func NewResolver(opts ...ResolverOption) *Resolver {
 	r := &Resolver{
@@ -96,12 +125,33 @@ func NewResolver(opts ...ResolverOption) *Resolver {
 	for _, opt := range opts {
 		opt(r)
 	}
+	// Eagerly load the build manifest when a path was provided so any file or
+	// schema errors surface at construction time rather than mid-resolve.
+	if r.buildManifestPath != "" && r.buildManifest == nil {
+		m, err := LoadManifestAndVerify(r.buildManifestPath, r.wasmPathForVerification)
+		if err != nil {
+			// Surface as a warning; Resolve will still attempt other stages.
+			logger.Logger.Warn("Failed to load build manifest; manifest stage disabled",
+				"path", r.buildManifestPath, "error", err)
+		} else {
+			r.buildManifest = m
+			logger.Logger.Info("Build manifest loaded",
+				"path", r.buildManifestPath,
+				"source_root", m.SourceRoot,
+				"revision", m.RepositoryRevision,
+			)
+		}
+	}
 	return r
 }
 
 // Resolve attempts to find verified source code for the given contract ID
 // through a multi-stage discovery pipeline:
 //
+//  0. Build manifest (explicit --build-manifest path or auto-discovered
+//     glassbox-build-manifest.json) — produces a SourceCode whose Repository
+//     field is the manifest's SourceRoot so DWARF path remapping works
+//     immediately on any machine.
 //  1. Local cache
 //  2. Registry (stellar.expert)
 //  3. GitHub retriever (when configured)
@@ -110,6 +160,7 @@ func NewResolver(opts ...ResolverOption) *Resolver {
 //
 // Failure modes:
 //   - Invalid contractID: returns a validation error immediately.
+//   - Manifest artifact_hash mismatch: returns ManifestHashMismatchError immediately.
 //   - All stages exhausted, non-interactive mode: returns ErrSourceNotFound.
 //   - Prompt read failure (interactive): returns a wrapped I/O error.
 //   - Returns (nil, nil) only when the user provides an empty path at the
@@ -118,6 +169,26 @@ func (r *Resolver) Resolve(ctx context.Context, contractID string) (*SourceCode,
 	if err := validateContractID(contractID); err != nil {
 		return nil, fmt.Errorf("invalid contract ID %q: %w\n"+
 			"  Contract IDs must start with 'C' and be exactly 56 characters long.", contractID, err)
+	}
+
+	// 0. Build manifest stage — highest priority because it encodes the exact
+	//    build provenance and can remap paths without any network access.
+	if r.buildManifest != nil {
+		logger.Logger.Info("Source resolved from build manifest",
+			"contract_id", contractID,
+			"source_root", r.buildManifest.SourceRoot,
+			"revision", r.buildManifest.RepositoryRevision,
+		)
+		return &SourceCode{
+			ContractID: contractID,
+			// Repository is set to SourceRoot so downstream DWARF resolvers use
+			// it as the base directory for relative path lookups.
+			Repository: r.buildManifest.SourceRoot,
+			// WasmHash carries the artifact_hash for any downstream hash checks.
+			WasmHash:  r.buildManifest.ArtifactHash,
+			Files:     map[string]string{},
+			FetchedAt: time.Now(),
+		}, nil
 	}
 
 	// 1. Check cache first.
@@ -206,8 +277,9 @@ func (r *Resolver) Resolve(ctx context.Context, contractID string) (*SourceCode,
 				"contract_id", contractID)
 			return nil, fmt.Errorf(
 				"%w for contract %q\n"+
-					"  Stages tried: cache, registry (stellar.expert), GitHub retriever, --contract-source override\n"+
-					"  To resolve: provide --contract-source <path> pointing to the contract source directory,\n"+
+					"  Stages tried: build manifest, cache, registry (stellar.expert), GitHub retriever, --contract-source override\n"+
+					"  To resolve: provide --build-manifest <path> pointing to a glassbox-build-manifest.json,\n"+
+					"  or --contract-source <path> pointing to the contract source directory,\n"+
 					"  or verify the contract on stellar.expert to enable registry lookup.\n"+
 					"  Use --skip-source-mapping to proceed without source mapping.",
 				ErrSourceNotFound, contractID,
@@ -277,6 +349,42 @@ func (r *Resolver) PromptForWasmPath() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(path), nil
+}
+
+// AutoDiscoverManifest attempts to find a glassbox-build-manifest.json in
+// conventional locations under projectRoot and, if found, loads and validates
+// it (including artifact hash verification against wasmPath when non-empty).
+// On success the manifest is stored in the resolver for use by ResolveFilePath
+// and Resolve.  The method is a no-op when the resolver already has a manifest
+// (explicit --build-manifest takes priority over auto-discovery).
+func (r *Resolver) AutoDiscoverManifest(projectRoot, wasmPath string) {
+	if r.buildManifest != nil {
+		return // explicit manifest wins; don't override
+	}
+
+	discovered, err := DiscoverManifest(projectRoot)
+	if err != nil {
+		logger.Logger.Debug("Manifest auto-discovery error", "project_root", projectRoot, "error", err)
+		return
+	}
+	if discovered == "" {
+		logger.Logger.Debug("No build manifest found during auto-discovery", "project_root", projectRoot)
+		return
+	}
+
+	m, loadErr := LoadManifestAndVerify(discovered, wasmPath)
+	if loadErr != nil {
+		logger.Logger.Warn("Auto-discovered manifest could not be loaded; skipping manifest stage",
+			"path", discovered, "error", loadErr)
+		return
+	}
+
+	r.buildManifest = m
+	logger.Logger.Info("Build manifest auto-discovered and loaded",
+		"path", discovered,
+		"source_root", m.SourceRoot,
+		"revision", m.RepositoryRevision,
+	)
 }
 
 // AutoDiscoverLocalSymbols scans the project root for local WASM builds.
@@ -367,14 +475,26 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 	return nil
 }
 
-// ResolveFilePath applies the alias resolver (if configured) to translate a
-// workspace-relative source file path to a real filesystem path.
-// Returns p unchanged when no alias resolver is set.
+// ResolveFilePath applies manifest path remapping (when a build manifest is
+// loaded) followed by the alias resolver (if configured) to translate a
+// build-machine source path to a real filesystem path on the current machine.
+// Returns p unchanged when neither is configured.
 func (r *Resolver) ResolveFilePath(p string) string {
-	if r.aliasResolver == nil {
-		return p
+	// Stage A: strip the build-machine SourceRoot prefix recorded in the
+	// manifest so only the repo-relative tail survives.
+	if r.buildManifest != nil {
+		p = r.buildManifest.RemapPath(p)
 	}
-	return r.aliasResolver.Resolve(p)
+	// Stage B: alias resolver maps workspace-relative prefixes to real paths.
+	if r.aliasResolver != nil {
+		p = r.aliasResolver.Resolve(p)
+	}
+	return p
+}
+
+// Manifest returns the loaded BuildManifest, or nil when none was configured.
+func (r *Resolver) Manifest() *BuildManifest {
+	return r.buildManifest
 }
 
 // InvalidateCache removes a specific contract from the cache.

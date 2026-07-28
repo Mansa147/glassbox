@@ -95,6 +95,7 @@ var (
 	saveSnapshotsFlag     string
 	wasmBase64            string
 	contractSourceFlag    string
+	buildManifestFlag     string
 	debugJSONFlag         bool
 	debugFormatFlag       string
 	skipSourceMappingFlag bool
@@ -529,6 +530,41 @@ Local WASM Replay Mode:
 						"  Provide the path to your contract's source directory, not a file.",
 					trimmed,
 				))
+			}
+		}
+
+		// Validate --build-manifest points to a readable, valid manifest file.
+		// Artifact hash verification against --wasm is deferred to the resolver
+		// so it happens with the actual WASM bytes in hand.
+		if buildManifestFlag != "" {
+			trimmed := strings.TrimSpace(buildManifestFlag)
+			if trimmed == "" {
+				return errors.WrapValidationError(
+					"--build-manifest: value must not be empty or whitespace\n" +
+						"  Provide the path to a glassbox-build-manifest.json file.",
+				)
+			}
+			if strings.ContainsRune(trimmed, 0) {
+				return errors.WrapValidationError(
+					"--build-manifest: path contains null bytes and cannot be used\n" +
+						"  Fix: remove any null bytes from the path.",
+				)
+			}
+			if _, statErr := os.Stat(trimmed); statErr != nil {
+				if os.IsNotExist(statErr) {
+					return errors.WrapValidationError(fmt.Sprintf(
+						"--build-manifest: file not found: %q\n"+
+							"  Generate a manifest with 'glassbox generate-manifest' or provide\n"+
+							"  a valid path to an existing glassbox-build-manifest.json file.",
+						trimmed,
+					))
+				}
+				return errors.WrapValidationError(fmt.Sprintf(
+					"--build-manifest: cannot access %q: %v", trimmed, statErr,
+				))
+			}
+			if _, manifestErr := sourcemap.LoadManifest(trimmed); manifestErr != nil {
+				return errors.WrapValidationError(fmt.Sprintf("%v", manifestErr))
 			}
 		}
 
@@ -2812,6 +2848,45 @@ func validateSourceDiscoveryFlags() error {
 		}
 	}
 
+	// --build-manifest must be a readable, valid glassbox-build-manifest.json.
+	// Full schema validation (including artifact hash check against --wasm) is
+	// deferred to resolver construction; here we only verify the file is
+	// readable and parses as valid JSON with the required fields present so the
+	// user gets an immediate, actionable error before any simulation work runs.
+	if buildManifestFlag != "" {
+		trimmed := strings.TrimSpace(buildManifestFlag)
+		if trimmed == "" {
+			return errors.WrapValidationError(
+				"--build-manifest: value must not be empty or whitespace\n" +
+					"  Provide the path to a glassbox-build-manifest.json file.",
+			)
+		}
+		if strings.ContainsRune(trimmed, 0) {
+			return errors.WrapValidationError(
+				"--build-manifest: path contains null bytes and cannot be used\n" +
+					"  Fix: remove any null bytes from the path.",
+			)
+		}
+		if _, statErr := os.Stat(trimmed); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return errors.WrapValidationError(fmt.Sprintf(
+					"--build-manifest: file not found: %q\n"+
+						"  Generate a manifest with 'glassbox generate-manifest' or provide\n"+
+						"  a valid path to an existing glassbox-build-manifest.json file.",
+					trimmed,
+				))
+			}
+			return errors.WrapValidationError(fmt.Sprintf(
+				"--build-manifest: cannot access %q: %v", trimmed, statErr,
+			))
+		}
+		// Perform a full schema parse so required-field errors are surfaced here.
+		// Artifact hash verification against --wasm happens later in the resolver.
+		if _, manifestErr := sourcemap.LoadManifest(trimmed); manifestErr != nil {
+			return errors.WrapValidationError(fmt.Sprintf("%v", manifestErr))
+		}
+	}
+
 	return nil
 }
 
@@ -2822,6 +2897,18 @@ func applyDebugSimulationOptions(req *simulator.SimulationRequest) {
 	req.SkipSourceMapping = skipSourceMappingFlag
 	if contractSourceFlag != "" {
 		req.ContractSourcePath = &contractSourceFlag
+	}
+	// Resolve effective build manifest path: CLI flag > GLASSBOX_BUILD_MANIFEST
+	// env var (already parsed into cfg.BuildManifestPath) > no manifest.
+	effectiveManifest := buildManifestFlag
+	if effectiveManifest == "" {
+		if cfg, err := config.Load(); err == nil && cfg.BuildManifestPath != "" {
+			effectiveManifest = cfg.BuildManifestPath
+		}
+	}
+	if effectiveManifest != "" {
+		v := effectiveManifest
+		req.BuildManifestPath = &v
 	}
 }
 
@@ -2988,6 +3075,9 @@ func init() {
 
 	// Source alias mapping flag
 	debugCmd.Flags().StringVar(&sourceAliasFlag, "source-alias", "", "Path to a JSON file mapping embedded source paths to local directory paths")
+
+	// Reproducible build manifest flag (Issue #45)
+	debugCmd.Flags().StringVar(&buildManifestFlag, "build-manifest", "", "Path to a glassbox-build-manifest.json for cross-machine source path remapping")
 
 	// Enum-flag completion registrations (never performs network I/O)
 	_ = debugCmd.RegisterFlagCompletionFunc("network", completeNetworkFlag)

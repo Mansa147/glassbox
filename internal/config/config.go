@@ -157,6 +157,11 @@ type Config struct {
 	FailureThreshold int `json:"failure_threshold,omitempty"`
 	// RetryTimeout is the duration in seconds to wait before retrying a failed endpoint.
 	RetryTimeout int `json:"retry_timeout,omitempty"`
+	// BuildManifestPath is the path to a glassbox-build-manifest.json file used
+	// for cross-machine source mapping from reproducible builds (Issue #45).
+	// Can also be set via the GLASSBOX_BUILD_MANIFEST environment variable.
+	// The --build-manifest CLI flag takes precedence over this value.
+	BuildManifestPath string `json:"build_manifest_path,omitempty"`
 }
 
 // -- Constants & Defaults --
@@ -464,6 +469,9 @@ func (envParser) Parse(cfg *Config) error {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			cfg.TelemetrySampleRate = f
 		}
+	}
+	if v := os.Getenv("GLASSBOX_BUILD_MANIFEST"); v != "" {
+		cfg.BuildManifestPath = v
 	}
 	return nil
 }
