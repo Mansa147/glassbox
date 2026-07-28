@@ -84,6 +84,10 @@ var (
 	// ErrSourceDiscoveryFailed is returned when source discovery for a contract
 	// fails and no fallback path is available or all fallback stages were exhausted.
 	ErrSourceDiscoveryFailed = stdliberrors.New("source discovery failed")
+	// ErrRPCInvalidResponse is returned when a JSON-RPC response fails
+	// structural validation at the RPC boundary (missing required fields,
+	// wrong types, or invalid error envelope shape).
+	ErrRPCInvalidResponse = stdliberrors.New("RPC response failed validation")
 )
 
 type LedgerNotFoundError struct {
@@ -376,6 +380,50 @@ func WrapRPCRequestTooLarge(sizeBytes int64, maxSizeBytes int64) error {
 	)
 }
 
+// RPCInvalidResponseError is returned when a JSON-RPC response is structurally
+// invalid. It carries the endpoint URL and the RPC method name so diagnostics
+// can identify exactly which call produced the malformed data without echoing
+// any response body that might contain credentials.
+type RPCInvalidResponseError struct {
+	// Endpoint is the URL of the RPC server that returned the response.
+	Endpoint string
+	// Method is the JSON-RPC method name (e.g. "getLedgerEntries").
+	Method string
+	// Field is the name of the missing or invalid field, if known.
+	Field string
+	// Reason is a human-readable description of the validation failure.
+	Reason string
+}
+
+func (e *RPCInvalidResponseError) Error() string {
+	if e.Field != "" {
+		return fmt.Sprintf(
+			"%v: %s from %s: field %q: %s",
+			ErrRPCInvalidResponse, e.Method, e.Endpoint, e.Field, e.Reason,
+		)
+	}
+	return fmt.Sprintf(
+		"%v: %s from %s: %s",
+		ErrRPCInvalidResponse, e.Method, e.Endpoint, e.Reason,
+	)
+}
+
+func (e *RPCInvalidResponseError) Is(target error) bool {
+	return target == ErrRPCInvalidResponse
+}
+
+// WrapRPCInvalidResponse returns a diagnostic error for a structurally invalid
+// RPC response. No response body or credential data should be passed; only the
+// field name and a structural reason are included.
+func WrapRPCInvalidResponse(endpoint, method, field, reason string) error {
+	return &RPCInvalidResponseError{
+		Endpoint: endpoint,
+		Method:   method,
+		Field:    field,
+		Reason:   reason,
+	}
+}
+
 func WrapMissingLedgerKey(key string) error {
 	return &MissingLedgerKeyError{Key: key}
 }
@@ -438,6 +486,10 @@ const (
 	CodeTransactionNotFound  ErstErrorCode = "RPC_TRANSACTION_NOT_FOUND"
 	CodeLedgerNotFound       ErstErrorCode = "RPC_LEDGER_NOT_FOUND"
 	CodeLedgerArchived       ErstErrorCode = "RPC_LEDGER_ARCHIVED"
+	// CodeRPCInvalidResponse is emitted when a JSON-RPC response passes HTTP
+	// delivery but fails structural validation (missing required fields, wrong
+	// types, or an invalid error-envelope shape).
+	CodeRPCInvalidResponse ErstErrorCode = "RPC_INVALID_RESPONSE"
 
 	// Simulator origin
 	CodeSimNotFound            ErstErrorCode = "SIM_BINARY_NOT_FOUND"
@@ -468,6 +520,7 @@ var codeToSentinel = map[ErstErrorCode]error{
 	CodeTransactionNotFound:    ErrTransactionNotFound,
 	CodeLedgerNotFound:         ErrLedgerNotFound,
 	CodeLedgerArchived:         ErrLedgerArchived,
+	CodeRPCInvalidResponse:     ErrRPCInvalidResponse,
 	CodeSimNotFound:            ErrSimulatorNotFound,
 	CodeSimCrash:               ErrSimCrash,
 	CodeSimExecFailed:          ErrSimulationFailed,

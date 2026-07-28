@@ -205,7 +205,14 @@ func (c *Client) getTransactionAttempt(ctx context.Context, hash string) (txResp
 
 	logger.Logger.Debug("Transaction fetched", "hash", hash, "envelope_size", len(tx.EnvelopeXdr), "url", c.HorizonURL)
 
-	return ParseTransactionResponse(tx), nil
+	parsed := ParseTransactionResponse(tx)
+	if err := ValidateTransactionResponse(c.HorizonURL, hash, parsed); err != nil {
+		span.RecordError(err)
+		logger.Logger.Error("Transaction response validation failed", "hash", hash, "url", c.HorizonURL, "error", err)
+		return nil, err
+	}
+
+	return parsed, nil
 }
 
 // GetNetworkPassphrase returns the network passphrase for this client
