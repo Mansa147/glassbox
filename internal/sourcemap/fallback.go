@@ -81,6 +81,8 @@ type FallbackResult struct {
 	SourceLink string `json:"source_link,omitempty"`
 	// CandidateLink is set when confidence is below auto-link threshold.
 	CandidateLink string `json:"candidate_link,omitempty"`
+	// LinkProvenance is rendered beside source links so reports identify the replay revision.
+	LinkProvenance string `json:"link_provenance,omitempty"`
 }
 
 // FallbackMapper resolves source locations for WASM binaries that may lack
@@ -93,41 +95,19 @@ type FallbackMapper struct {
 
 // NewFallbackMapper creates a FallbackMapper with the given project root.
 // Pass an empty string to use the current working directory.
-func NewFallbackMapper(projectRoot string) (*FallbackMapper, error) {
+func NewFallbackMapper(projectRoot string) *FallbackMapper {
 	if projectRoot == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("sourcemap: failed to resolve current working directory: %w", err)
+		if cwd, err := os.Getwd(); err == nil {
+			projectRoot = cwd
 		}
-		projectRoot = cwd
 	}
-	return &FallbackMapper{ProjectRoot: projectRoot}, nil
+	return &FallbackMapper{ProjectRoot: projectRoot}
 }
 
 // Resolve attempts to map a WASM instruction address to a source location
 // using a multi-stage fallback pipeline. It always returns a non-nil result;
 // Quality indicates how reliable the mapping is.
 func (m *FallbackMapper) Resolve(wasmData []byte, addr uint64) *FallbackResult {
-	if len(wasmData) == 0 {
-		return &FallbackResult{
-			Quality: MappingQualityUnknown,
-			Warning: fmt.Sprintf(
-				"[sourcemap] cannot resolve source location for address 0x%x: "+
-					"WASM data is empty. Provide a valid WASM binary.",
-				addr,
-			),
-		}
-	}
-
-	if len(wasmData) < 8 || wasmData[0] != 0x00 || wasmData[1] != 0x61 || wasmData[2] != 0x73 || wasmData[3] != 0x6d {
-		return &FallbackResult{
-			Quality: MappingQualityUnknown,
-			Warning: fmt.Sprintf(
-				"[sourcemap] cannot resolve source location for address 0x%x: "+
-					"data does not start with WASM magic bytes. Provide a valid WASM binary.",
-				addr,
-			),
-		}
 	// Guard against nil or too-small WASM data — the binary helpers would
 	// silently produce no results anyway, but surfacing a clear unknown result
 	// with a remediation warning is more useful than a silent no-op.

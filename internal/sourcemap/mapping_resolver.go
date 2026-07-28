@@ -41,8 +41,11 @@ func (r *MappingResolver) attachSourceLink(result *FallbackResult) {
 	default:
 		return
 	}
-	url, err := ResolveGitHubURL(r.startPath, result.File, r.external)
+	url, provenance, err := ResolveGitHubURLWithProvenance(r.startPath, result.File, r.external, RevisionOptions{})
+	result.LinkProvenance = provenance.Label()
 	if err != nil {
+		// Keep the label in machine-readable mapping output even when policy
+		// correctly refuses to create a potentially misleading link.
 		return
 	}
 	if result.LinkPresentation == LinkAuto {

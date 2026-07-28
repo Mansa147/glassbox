@@ -113,9 +113,17 @@ func MergeDebugSymbols(expectedContractID string) error {
 				fmt.Fprintf(os.Stderr, "  Source mapping: %s\n", summary)
 			}
 			if result.SourceLink != "" {
-				fmt.Fprintf(os.Stderr, "  Source link: %s\n", result.SourceLink)
+				fmt.Fprintf(os.Stderr, "  Source link: %s", result.SourceLink)
+				if result.LinkProvenance != "" {
+					fmt.Fprintf(os.Stderr, " (%s)", result.LinkProvenance)
+				}
+				fmt.Fprintln(os.Stderr)
 			} else if result.CandidateLink != "" {
-				fmt.Fprintf(os.Stderr, "  Candidate source link: %s\n", result.CandidateLink)
+				fmt.Fprintf(os.Stderr, "  Candidate source link: %s", result.CandidateLink)
+				if result.LinkProvenance != "" {
+					fmt.Fprintf(os.Stderr, " (%s)", result.LinkProvenance)
+				}
+				fmt.Fprintln(os.Stderr)
 			}
 
 			if result.Warning != "" {
