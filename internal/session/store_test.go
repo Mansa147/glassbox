@@ -5,6 +5,7 @@ package session
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestStore_Save_EmptyTxHash_ReturnsError(t *testing.T) {
 		Status:  "saved",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TxHash is required")
+	assert.Contains(t, err.Error(), "transaction hash is required")
 }
 
 func TestStore_Save_EmptyNetwork_ReturnsError(t *testing.T) {
@@ -84,7 +85,9 @@ func TestStore_Save_InvalidNetwork_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "futurenet")
 }
 
-func TestStore_Save_EmptyStatus_ReturnsError(t *testing.T) {
+// TestStore_Save_EmptyStatus_AutoPopulatesActive verifies that omitting Status
+// causes Save to default it to "active" rather than returning an error.
+func TestStore_Save_EmptyStatus_AutoPopulatesActive(t *testing.T) {
 	store, err := NewStore()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
@@ -94,8 +97,7 @@ func TestStore_Save_EmptyStatus_ReturnsError(t *testing.T) {
 		TxHash:  "abc",
 		Network: "testnet",
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "status is required")
+	require.NoError(t, err, "empty status should be auto-populated to 'active', not rejected")
 }
 
 func TestStore_Save_InvalidStatus_ReturnsError(t *testing.T) {
@@ -160,10 +162,7 @@ func TestStore_Save_PinnedEndpointValidation(t *testing.T) {
 
 	err = store.Save(context.Background(), data)
 	require.NoError(t, err)
-	"strings"
-	"testing"
-	"time"
-)
+}
 
 func TestStore_SaveLoad_RoundTrip(t *testing.T) {
 	overrideTempHome(t)

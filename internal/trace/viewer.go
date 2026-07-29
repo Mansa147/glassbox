@@ -5,6 +5,7 @@ package trace
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -45,6 +46,10 @@ type InteractiveViewer struct {
 	// Computed once at construction; the fingerprinted fields never change
 	// during a viewing session.
 	stateFP string
+	// refreshHandler wires incremental trace refresh into the viewer.
+	// It is nil until AttachRefreshHandler is called; the 'refresh' command
+	// is silently unavailable when it is nil.
+	refreshHandler *ViewerRefreshHandler
 }
 
 type fetchedState struct {
@@ -111,6 +116,13 @@ func NewInteractiveViewerWithWASM(trace *ExecutionTrace, wasmData []byte) *Inter
 	viewer.trap = detector.FindTrapPoint(trace)
 
 	return viewer
+}
+
+// AttachRefreshHandler registers a ViewerRefreshHandler with the viewer,
+// enabling the 'refresh' and 'refresh-status' interactive commands.
+// Call this after constructing the viewer and before calling Start.
+func (v *InteractiveViewer) AttachRefreshHandler(h *ViewerRefreshHandler) {
+	v.refreshHandler = h
 }
 
 // Start begins the interactive trace viewing session.
@@ -319,6 +331,10 @@ func (v *InteractiveViewer) handleCommand(command string) bool {
 		} else {
 			fmt.Println("Usage: yank <a/r> [index]")
 		}
+	case "refresh":
+		v.handleRefreshCommand(parts[1:])
+	case "refresh-status", "rs":
+		v.handleRefreshStatusCommand()
 	default:
 		// Check if the command starts with / — treat as inline search.
 		if strings.HasPrefix(cmdExact, "/") {
@@ -1238,6 +1254,8 @@ func (v *InteractiveViewer) showHelp() {
 	fmt.Println("  ?, h, help           - Show this help")
 	fmt.Println("  y, yank <a/r> [idx]  - Copy raw XDR")
 	fmt.Println("  reset [all]          - Clear persisted viewer state (this trace, or all traces)")
+	fmt.Println("  refresh <snapshot>   - Incremental refresh: reload only affected steps from updated snapshot")
+	fmt.Println("  refresh-status, rs   - Show last refresh time and auto-refresh status")
 	fmt.Println("  q, quit, exit        - Exit viewer")
 }
 
@@ -1291,4 +1309,46 @@ func (v *InteractiveViewer) handleYank(args []string) {
 	}
 
 	fmt.Printf("%s Copied raw XDR to clipboard\n", visualizer.Symbol("sparkles"))
+}
+
+// handleRefreshCommand processes the 'refresh <snapshot-path>' command.
+// It delegates to the attached ViewerRefreshHandler, which runs incremental
+// change detection and re-simulates only the affected execution steps.
+func (v *InteractiveViewer) handleRefreshCommand(args []string) {
+	if v.refreshHandler == nil {
+		fmt.Printf("%s Incremental refresh is not available in this session.\n"+
+			"  Hint: start Glassbox with a base snapshot to enable refresh.\n",
+			visualizer.Error())
+		return
+	}
+	if len(args) == 0 {
+		fmt.Printf("%s Usage: refresh <path/to/updated_snapshot.json>\n", visualizer.Error())
+		return
+	}
+	ctx := context.Background()
+	if err := v.refreshHandler.HandleRefreshCommand(ctx, args); err != nil {
+		fmt.Printf("%s Refresh failed: %v\n", visualizer.Error(), err)
+		return
+	}
+	// Re-display current state so the user sees the updated trace immediately.
+	v.displayCurrentState()
+}
+
+// handleRefreshStatusCommand prints the current refresh handler status.
+func (v *InteractiveViewer) handleRefreshStatusCommand() {
+	if v.refreshHandler == nil {
+		fmt.Println("Incremental refresh is not configured for this session.")
+		return
+	}
+	status := v.refreshHandler.GetRefreshStatus()
+	termW := getTermWidth()
+	fmt.Printf("\n%s Refresh Status\n", visualizer.Symbol("sync"))
+	fmt.Println(separator(termW))
+	fmt.Printf("Auto-refresh:   %v\n", status["auto_refresh_enabled"])
+	if last, ok := status["last_refresh_time"].(time.Time); ok && !last.IsZero() {
+		fmt.Printf("Last refresh:   %s (%v ago)\n",
+			last.Format("15:04:05"), status["time_since_refresh"])
+	} else {
+		fmt.Println("Last refresh:   never")
+	}
 }

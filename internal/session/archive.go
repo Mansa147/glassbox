@@ -193,7 +193,7 @@ func ExportArchiveWithOptions(data *Data, destPath string, opts ArchiveOptions) 
 	}
 
 	// Write session.json. Its bytes become the "metadata" manifest member.
-	sessionBytes, err := writeJSONEntry(zw, "session.json", data)
+	sessionBytes, err := writeSessionJSONEntry(zw, "session.json", data)
 	if err != nil {
 		return fmt.Errorf("failed to write session.json: %w", err)
 	}
@@ -311,7 +311,7 @@ func ImportArchiveWithManifest(srcPath string) (*Data, *ManifestReport, error) {
 	// Reject null bytes early — they cannot appear in valid file paths and are
 	// a sign of attempted injection.
 	if strings.ContainsRune(srcPath, 0) {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"archive path contains null bytes and cannot be used: %q\n"+
 				"  Fix: provide a path without null bytes (e.g. ./session.gbx)",
 			srcPath,
@@ -494,9 +494,31 @@ func ImportArchiveWithManifest(srcPath string) (*Data, *ManifestReport, error) {
 		data.AnnotationsJSON = string(raw)
 	}
 
-	// Validate the reconstructed session data so imported archives with missing
-	// or corrupt fields are rejected with a clear diagnostic instead of silently
-	// producing a broken session.
+	// Preserve unknown/additive fields from session.json so that an older
+	// binary does not silently discard forward-compatible extensions added
+	// by a newer one. We decode the raw session bytes into a generic map and
+	// keep everything the struct did not consume as ExtrasJSON.
+	if sessionRaw, ok := rawMembers["metadata"]; ok {
+		data.ExtrasJSON = extractUnknownFields(sessionRaw, &data)
+	}
+
+	// Run schema migration on the imported data using the same upgrade path
+	// as the load path. This means imported archives from older Glassbox
+	// versions are upgraded deterministically before validation runs,
+	// producing the same outcome as if the session had been loaded from the
+	// SQLite store.
+	if schemaErr := ValidateSchemaVersion(data.SchemaVersion, data.ID); schemaErr != nil {
+		return nil, manifestReport, schemaErr
+	}
+	if _, upgradeErr := UpgradeSessionData(&data); upgradeErr != nil {
+		return nil, manifestReport, fmt.Errorf(
+			"archive %q: failed to upgrade session schema: %w", srcPath, upgradeErr,
+		)
+	}
+
+	// Validate the reconstructed (and potentially upgraded) session data so
+	// imported archives with missing or corrupt fields are rejected with a
+	// clear diagnostic instead of silently producing a broken session.
 	report := ValidateIntegrity(&data)
 	if !report.OK {
 		var sb strings.Builder
@@ -652,4 +674,93 @@ func EnsureDeterministicOrder(data *Data) *Data {
 	// This is a shallow sort; deep sorting is handled by SortMapKeys
 
 	return &result
+}
+
+// ── Unknown-field preservation helpers ───────────────────────────────────────
+
+// knownSessionJSONKeys is the set of top-level JSON keys that the Data struct
+// consumes during a normal json.Unmarshal. Any key present in a session.json
+// but absent from this set is an unknown/additive field that should be
+// preserved in ExtrasJSON so a round-trip does not silently discard it.
+var knownSessionJSONKeys = map[string]bool{
+	"id": true, "name": true, "created_at": true, "last_access_at": true,
+	"status": true, "network": true, "horizon_url": true, "tx_hash": true,
+	"envelope_xdr": true, "result_xdr": true, "result_meta_xdr": true,
+	"pinned_endpoint": true, "audit_hash": true, "audit_signature": true,
+	"previous_session_hash": true, "sim_request_json": true,
+	"sim_response_json": true, "env_fingerprint": true, "provenance_json": true,
+	"GLASSBOX_version": true, "schema_version": true, "encrypted_payload": true,
+}
+
+// extractUnknownFields decodes raw session JSON and returns a map of any
+// top-level fields that are not present in knownSessionJSONKeys. The returned
+// map is nil when there are no unknown fields. Decoding errors are silently
+// ignored — unknown-field preservation is best-effort and must never block the
+// import of an otherwise valid archive.
+func extractUnknownFields(raw []byte, _ *Data) map[string]json.RawMessage {
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &all); err != nil {
+		return nil
+	}
+	extras := make(map[string]json.RawMessage)
+	for k, v := range all {
+		if !knownSessionJSONKeys[k] {
+			extras[k] = v
+		}
+	}
+	if len(extras) == 0 {
+		return nil
+	}
+	return extras
+}
+
+// marshalSessionWithExtras serialises data to JSON, merging any ExtrasJSON
+// fields back in so that a round-tripped archive contains the same unknown
+// keys it arrived with. Fields in ExtrasJSON that collide with known struct
+// keys are silently dropped to prevent confusion.
+func marshalSessionWithExtras(data *Data) ([]byte, error) {
+	// First encode the struct normally.
+	base, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal session data: %w", err)
+	}
+	if len(data.ExtrasJSON) == 0 {
+		return base, nil
+	}
+
+	// Decode base back to a generic map, inject extras, re-encode.
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		// Unexpected but non-fatal — return the clean base.
+		return base, nil
+	}
+	for k, v := range data.ExtrasJSON {
+		if knownSessionJSONKeys[k] {
+			continue // never overwrite known fields with stale extras
+		}
+		merged[k] = v
+	}
+	out, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return base, nil // fallback to base on encode error
+	}
+	return out, nil
+}
+
+// writeSessionJSONEntry serialises the session Data (preserving extras) as a
+// named entry in the zip, returning the exact bytes written so callers can
+// hash them for a Manifest.
+func writeSessionJSONEntry(zw *zip.Writer, name string, data *Data) ([]byte, error) {
+	sessionBytes, err := marshalSessionWithExtras(data)
+	if err != nil {
+		return nil, err
+	}
+	w, err := zw.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(sessionBytes); err != nil {
+		return nil, err
+	}
+	return sessionBytes, nil
 }

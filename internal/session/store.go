@@ -90,6 +90,15 @@ type Data struct {
 	// BundleJSON, SourceMapJSON, and AnnotationsJSON are empty on this
 	// record — see encryption.go.
 	EncryptedPayload *EncryptedEnvelope `json:"encrypted_payload,omitempty"`
+
+	// ExtrasJSON preserves additive or unknown fields that appear in an
+	// archive's session.json but are not recognised by the current struct
+	// definition. This allows older binaries to round-trip newer archives
+	// without silently discarding fields they do not understand.
+	// ExtrasJSON is never written to the SQLite store — it only travels
+	// with archive import/export paths — so the runtime schema stays stable
+	// even when archives carry forward-compatible extensions.
+	ExtrasJSON map[string]json.RawMessage `json:"-"`
 }
 
 // Store manages session persistence in SQLite
@@ -317,21 +326,6 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		return fmt.Errorf("session ID is required")
 	}
 	if data.TxHash == "" {
-		return fmt.Errorf("session TxHash is required")
-	}
-	if data.Network == "" {
-		return fmt.Errorf("session network is required")
-	}
-	validNetworks := map[string]bool{"testnet": true, "mainnet": true, "futurenet": true}
-	if !validNetworks[data.Network] {
-		return fmt.Errorf("session network %q is invalid: accepted values are testnet, mainnet, futurenet", data.Network)
-	}
-	if data.Status == "" {
-		return fmt.Errorf("session status is required")
-	}
-	validStatuses := map[string]bool{"active": true, "saved": true, "resumed": true, "recovered": true, "expired": true}
-	if !validStatuses[data.Status] {
-		return fmt.Errorf("session status %q is invalid: accepted values are active, saved, resumed, recovered, expired", data.Status)
 		return fmt.Errorf(
 			"session transaction hash is required\n" +
 				"  Fix: run 'glassbox debug <tx-hash>' to create a session with a valid transaction hash",
