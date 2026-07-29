@@ -383,6 +383,7 @@ glassbox version --json
 - **[Incremental Trace Refresh](docs/incremental-trace-refresh.md)**: Incremental trace viewer state persistence.
 - **[Snapshot Deduplication](docs/snapshot-deduplication.md)**: How ledger snapshots are deduplicated.
 - **[Binding Validation](docs/binding-validation.md)**: ABI binding generation and validation.
+- **[Runtime Binding Validation](docs/runtime-binding-validation.md)**: Runtime validators for command inputs, trace payloads, audit records, and session envelopes.
 - **[Sandboxed Replay](docs/sandboxed-replay.md)**: Isolated WASM replay in a sandboxed environment.
 - **[Session Bookmarking](docs/session-bookmarking.md)**: Persistent session management and bookmarks.
 - **[Security Warnings](docs/security-warnings.md)**: Deprecated host functions and security findings.
