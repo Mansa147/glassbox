@@ -217,11 +217,164 @@ jobs:
           path: dist/release/
           retention-days: 30
 
+  # ── Generate SBOM: merge Go modules, Cargo crates, npm packages ─────────────
+  generate-sbom:
+    name: Generate SBOM (SPDX 2.3)
+    runs-on: ubuntu-latest
+    needs: [package]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Download packaged release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ steps.version.outputs.version }}
+          path: dist/release
+
+      - name: Install npm dependencies (for package-lock.json)
+        # We need package-lock.json to be present and up-to-date.
+        # `npm ci --ignore-scripts` is safe here — we only need the lockfile.
+        run: npm ci --ignore-scripts --prefer-offline
+
+      - name: Build generate-sbom tool
+        run: go build -o bin/generate-sbom ./cmd/generate-sbom
+
+      - name: Collect Go module list
+        run: go list -m -json all > /tmp/go-modules.json
+        env:
+          GOFLAGS: "-mod=readonly"
+
+      - name: Generate SBOM
+        id: sbom
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT_SHA: ${{ steps.version.outputs.commit }}
+          SBOM_TOOL: ${{ github.workspace }}/bin/generate-sbom
+          GO_MODULES_JSON: /tmp/go-modules.json
+          CARGO_LOCK: simulator/Cargo.lock
+          PACKAGE_LOCK: package-lock.json
+          DIST_DIR: dist/release
+        run: |
+          SBOM_FILE=$(bash scripts/generate-sbom.sh dist/release)
+          echo "sbom_file=${SBOM_FILE}" >> "$GITHUB_OUTPUT"
+          echo "sbom_name=$(basename "${SBOM_FILE}")" >> "$GITHUB_OUTPUT"
+          echo "SBOM written: ${SBOM_FILE}"
+
+      - name: Verify SBOM against lockfiles
+        run: |
+          bash scripts/verify-sbom.sh "${{ steps.sbom.outputs.sbom_file }}" \
+            --go-modules /tmp/go-modules.json \
+            --cargo-lock  simulator/Cargo.lock \
+            --package-lock package-lock.json \
+            --strict
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: ${{ steps.sbom.outputs.sbom_file }}
+          retention-days: 30
+
+      - name: Add SBOM to release package
+        # Merge the SBOM into the release artifact bundle so sign-manifest can
+        # hash it along with the binaries.
+        run: cp "${{ steps.sbom.outputs.sbom_file }}" dist/release/
+
+      - name: Re-upload release package with SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-with-sbom-${{ steps.version.outputs.version }}
+          path: dist/release/
+          retention-days: 30
+
+  # ── Vulnerability scan: osv-scanner across all three ecosystems ─────────────
+  sbom-vuln-scan:
+    name: Vulnerability scan (osv-scanner)
+    runs-on: ubuntu-latest
+    needs: [generate-sbom]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: dist/release
+
+      - name: Install osv-scanner
+        run: go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+
+      - name: Run vulnerability scan
+        id: vuln
+        run: |
+          mkdir -p vuln-reports
+          bash scripts/sbom-vuln-scan.sh \
+            --go-sum        go.sum \
+            --cargo-lock    simulator/Cargo.lock \
+            --package-lock  package-lock.json \
+            --sbom          dist/release/$(ls dist/release/*.spdx.json 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "") \
+            --output-dir    vuln-reports \
+            --fail-on       HIGH \
+            --format        table
+
+      - name: Upload vulnerability scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuln-scan-${{ steps.version.outputs.version }}
+          path: vuln-reports/
+          retention-days: 30
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always() && hashFiles('vuln-reports/osv-scan.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: vuln-reports/osv-scan.sarif
+          category: osv-scanner
+
   # ── Sign manifest: hash every artifact, sign with Ed25519, verify ────────────
   sign-manifest:
     name: Sign release manifest
     runs-on: ubuntu-latest
-    needs: [package]
+    needs: [generate-sbom, sbom-vuln-scan]
 
     steps:
       - uses: actions/checkout@v7
@@ -245,6 +398,16 @@ jobs:
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Download packaged release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Prefer the bundle that already contains the SBOM (produced by generate-sbom).
+          # Fall back to the base package artifact when SBOM generation was skipped.
+          pattern: release-with-sbom-${{ steps.version.outputs.version }}
+          path: dist/release
+          merge-multiple: true
+
+      - name: Fallback — download base release if SBOM bundle missing
+        if: hashFiles('dist/release/checksums.sha256') == ''
         uses: actions/download-artifact@v4
         with:
           name: release-${{ steps.version.outputs.version }}
@@ -379,10 +542,25 @@ jobs:
             bash verify-manifest.sh manifest.json .
             ```
 
+            ### Verify the SBOM
+
+            ```bash
+            # Download the SBOM and verification script
+            curl -LO "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/glassbox-${{ steps.version.outputs.version }}.spdx.json"
+            curl -LO https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/verify-sbom.sh
+
+            # Structural validation + manifest coverage check (requires python3)
+            bash verify-sbom.sh "glassbox-${{ steps.version.outputs.version }}.spdx.json" \
+              --manifest manifest.json
+            ```
+
+            See [docs/sbom.md](https://github.com/${{ github.repository }}/blob/main/docs/sbom.md) for full SBOM documentation.
+
             See [docs/release-manifest.md](https://github.com/${{ github.repository }}/blob/main/docs/release-manifest.md) for full verification instructions.
           files: |
             dist/release/*.tar.gz
             dist/release/*.zip
+            dist/release/*.spdx.json
             dist/release/checksums.sha256
             dist/release/version.txt
             dist/release/manifest.json

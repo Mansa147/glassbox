@@ -157,3 +157,70 @@ func TestRun_EndToEnd(t *testing.T) {
 	result := manifest.Verify(&sm)
 	assert.True(t, result.Valid, "manifest must verify after round-trip")
 }
+
+// ─── SBOM detection helpers ───────────────────────────────────────────────────
+
+func TestIsSBOMFile(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"glassbox-v1.0.0.spdx.json", true},
+		{"glassbox-v1.0.0.sbom.json", true},
+		{"glassbox-v1.0.0.cdx.json", true},
+		{"checksums.sha256", false},
+		{"glassbox-linux-amd64.tar.gz", false},
+		{"version.txt", false},
+		{"manifest.json", false},
+	}
+	for _, c := range cases {
+		got := isSBOMFile(c.name)
+		assert.Equal(t, c.want, got, "isSBOMFile(%q)", c.name)
+	}
+}
+
+func TestDetectSBOMRef_FindsSPDXFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-v1.0.0.spdx.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+
+	ref := detectSBOMRef(dir)
+	assert.Equal(t, "glassbox-v1.0.0.spdx.json", ref)
+}
+
+func TestDetectSBOMRef_NoSBOM(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+
+	ref := detectSBOMRef(dir)
+	assert.Empty(t, ref, "detectSBOMRef must return empty when no SBOM present")
+}
+
+func TestRun_AutoDetectsSBOMRef(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-linux-amd64.tar.gz"), []byte("fake archive"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-v1.0.0.spdx.json"), []byte(`{"spdxVersion":"SPDX-2.3"}`), 0644))
+
+	keyPath := generateTestKey(t)
+	outPath := filepath.Join(dir, "manifest.json")
+
+	err := run([]string{
+		"--dist", dir,
+		"--version", "v1.0.0",
+		"--commit", strings.Repeat("a", 40),
+		"--build-date", "2026-01-01T00:00:00Z",
+		"--signing-key", keyPath,
+		"--output", outPath,
+		"--json-only",
+		// NOTE: no --sbom-ref flag — it should be auto-detected.
+	})
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	var sm manifest.SignedManifest
+	require.NoError(t, json.Unmarshal(raw, &sm))
+	assert.Equal(t, "glassbox-v1.0.0.spdx.json", sm.SBOMRef,
+		"SBOMRef must be auto-populated from the detected SPDX file")
+}

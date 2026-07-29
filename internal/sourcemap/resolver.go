@@ -41,6 +41,10 @@ type Resolver struct {
 	// wasmPathForVerification is the local WASM artifact path forwarded from
 	// --wasm so that the manifest's artifact_hash can be verified on load.
 	wasmPathForVerification string
+	// dwarfCaps is the DWARF capability report computed by the most recent
+	// AutoDiscoverLocalSymbols call. Nil until that method succeeds in reading
+	// a WASM file. Exposed via DWARFCapabilityReport().
+	dwarfCaps *CapabilityReport
 }
 
 // ErrSourceNotFound is a sentinel returned by Resolve when all discovery
@@ -443,12 +447,61 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 	logger.Logger.Info("Found local WASM match",
 		"file", filepath.Base(matchedPath), "path", matchedPath)
 
+	// ── DWARF capability detection ────────────────────────────────────────────
+	// Run capability detection *before* attempting any DWARF tree parsing.
+	// This is cheap (reads the section table only) and gives precise,
+	// structured diagnostics that distinguish:
+	//   • stripped binaries (no debug sections)
+	//   • unsupported DWARF version (names the version and the supported range)
+	//   • partial debug info (names the missing sections and lost capabilities)
+	capReport := DetectCapabilitiesFromBytes(content)
+	r.dwarfCaps = capReport
+
+	// Emit a structured log entry for each issue so operators can filter by
+	// the "dwarf_*" check label.
+	for _, issue := range capReport.Issues {
+		switch issue.Severity {
+		case "error":
+			logger.Logger.Error("DWARF capability check failed",
+				"check", issue.Check,
+				"description", issue.Description,
+				"hint", issue.Hint,
+				"file", filepath.Base(matchedPath),
+			)
+		default:
+			logger.Logger.Warn("DWARF capability warning",
+				"check", issue.Check,
+				"description", issue.Description,
+				"hint", issue.Hint,
+				"file", filepath.Base(matchedPath),
+			)
+		}
+	}
+
+	// When the binary has no usable mapping capability at all, surface the
+	// DWARF summary and return early with a user-friendly error — do not
+	// attempt further parsing that would produce a generic ErrNoDebugInfo.
+	if !capReport.DWARF.Supported {
+		logger.Logger.Warn(
+			"Local WASM found but DWARF capabilities are insufficient for source mapping",
+			"file", filepath.Base(matchedPath),
+			"dwarf_summary", capReport.DWARF.Summary(),
+		)
+		// Return nil (not an error) so the caller can continue without symbols;
+		// the structured issues in r.dwarfCaps are available for display.
+		return nil
+	}
+
+	// ── Parse DWARF tree ─────────────────────────────────────────────────────
 	parser, parseErr := dwarf.NewParser(content)
 	if parseErr != nil {
+		// Attach the capability report to the error message so the user knows
+		// exactly which version/sections were detected.
 		return fmt.Errorf(
 			"failed to parse DWARF from %q: %w\n"+
+				"  DWARF capabilities: %s\n"+
 				"  Ensure the WASM was compiled with 'debug = true' in [profile.release].",
-			matchedPath, parseErr,
+			matchedPath, parseErr, capReport.DWARF.Summary(),
 		)
 	}
 
@@ -461,6 +514,14 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 		return nil
 	}
 
+	// When the parser has a capability report of its own (set by NewParser),
+	// merge any additional warnings it produced into our stored report so the
+	// accessor always reflects the most up-to-date information.
+	if pc := parser.Capabilities(); pc != nil && len(pc.Warnings) > len(capReport.DWARF.Warnings) {
+		merged := DetectCapabilitiesFromBytes(content)
+		r.dwarfCaps = merged
+	}
+
 	subprograms, spErr := parser.GetSubprograms()
 	if spErr != nil {
 		return fmt.Errorf(
@@ -471,7 +532,14 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 
 	logger.Logger.Info("Automatically merged symbols from local build",
 		"file", filepath.Base(matchedPath),
-		"count", len(subprograms))
+		"count", len(subprograms),
+		"dwarf_version", capReport.DWARF.Version,
+		"supported_mappings", fmt.Sprintf("lines=%v vars=%v inlines=%v",
+			capReport.DWARF.Mappings.SourceLines,
+			capReport.DWARF.Mappings.LocalVars,
+			capReport.DWARF.Mappings.InlineFrames,
+		),
+	)
 	return nil
 }
 

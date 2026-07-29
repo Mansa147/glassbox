@@ -127,6 +127,14 @@ func run(args []string) error {
 	}
 	logf("  Found %d artifact(s)", len(entries))
 
+	// Auto-detect SBOM reference when the flag was not explicitly set.
+	if f.sbomRef == "" {
+		if detected := detectSBOMRef(f.dist); detected != "" {
+			f.sbomRef = detected
+			logf("  Auto-detected SBOM: %s", f.sbomRef)
+		}
+	}
+
 	// Build provenance if any identity flags were set.
 	var prov *manifest.ManifestProvenance
 	if f.signerIdentity != "" || f.keyID != "" {
@@ -188,6 +196,8 @@ func run(args []string) error {
 // detectArtifacts scans dir and classifies every file into an ArtifactEntry.
 // It skips the manifest file itself (manifest.json / *.manifest.json) to avoid
 // self-referential entries.
+// It also returns the filename of the first SBOM file found (if any) so the
+// caller can use it as the default --sbom-ref when the flag was not set.
 func detectArtifacts(dir string) ([]manifest.ArtifactEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -213,6 +223,21 @@ func detectArtifacts(dir string) ([]manifest.ArtifactEntry, error) {
 		})
 	}
 	return result, nil
+}
+
+// detectSBOMRef scans dir for the first SBOM artifact (.spdx.json, .sbom.json,
+// .cdx.json) and returns its filename. Returns "" when none is found.
+func detectSBOMRef(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && isSBOMFile(e.Name()) {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 // platformFromName infers the target platform from a filename such as
@@ -246,12 +271,23 @@ func kindFromName(name string) manifest.ArtifactKind {
 		return manifest.KindArchive
 	case strings.Contains(lower, "checksum") || strings.HasSuffix(lower, ".sha256"):
 		return manifest.KindChecksum
+	// SPDX / CycloneDX SBOM files and other metadata are all KindMetadata.
 	case strings.HasSuffix(lower, ".spdx.json"), strings.HasSuffix(lower, ".sbom.json"),
+		strings.HasSuffix(lower, ".cdx.json"),
 		strings.HasSuffix(lower, ".txt"), strings.HasSuffix(lower, ".json"):
 		return manifest.KindMetadata
 	default:
 		return manifest.KindBinary
 	}
+}
+
+// isSBOMFile returns true when name is an SBOM artifact that should be
+// auto-detected as the --sbom-ref when no explicit flag was provided.
+func isSBOMFile(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".spdx.json") ||
+		strings.HasSuffix(lower, ".sbom.json") ||
+		strings.HasSuffix(lower, ".cdx.json")
 }
 
 // loadSigner parses keyPEM (a file path or literal PEM string) and returns an
