@@ -373,6 +373,7 @@ glassbox version --json
 
 ## Documentation
 
+- **[Observability Troubleshooting](docs/observability-troubleshooting.md)**: Practical guide to logs, Prometheus metrics, OpenTelemetry traces, telemetry events, correlation IDs, and collection failure diagnosis.
 - **[Source Mapping](docs/source-mapping.md)**: Implementation details for mapping WASM failures to Rust source code.
 - **[JSON CLI Output](docs/json-output.md)**: Machine-readable `--json` / `--format json` options for automation.
 - **[Audit Log Signing](docs/audit-signing.md)**: Software and HSM signing for audit logs.
