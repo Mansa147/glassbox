@@ -3,6 +3,71 @@
 Glassbox maps WASM instruction failures back to Rust source code lines using
 DWARF debug symbols embedded in the compiled WASM binary.
 
+## Explain Mode
+
+When a source mapping is unexpected, low-confidence, or fails entirely, the
+`sourcemap explain` command reveals the full resolution decision trail:
+
+```bash
+# Explain DWARF address resolution
+glassbox sourcemap explain --wasm ./contract.wasm --addr 0x1234
+
+# Same in machine-readable form (for CI and automation)
+glassbox sourcemap explain --wasm ./contract.wasm --addr 0x1234 --format json
+
+# Explain contract source-discovery (cache / registry / GitHub / override pipeline)
+glassbox sourcemap explain --contract-id C...
+glassbox sourcemap explain --contract-id C... --format json
+```
+
+### What the output shows
+
+For each pipeline stage attempted, the output lists:
+
+| Field      | Description |
+|------------|-------------|
+| `stage`    | Which resolution stage was tried (e.g. `full_dwarf`, `cache`, `registry`) |
+| `accepted` | Whether this stage produced the final result |
+| `reason`   | Why the candidate was accepted or rejected |
+| `location` | Resolved file and line number (when available) |
+| `quality`  | `full` \| `partial` \| `heuristic` \| `unknown` |
+| `confidence` | 0–100 score for the final mapping |
+
+The explain output never contains raw WASM binary data or full source file contents.
+
+### Interpreting confidence
+
+| Score | Meaning |
+|-------|---------|
+| 100   | Exact DWARF line-table hit at the instruction address |
+| 72    | Subprogram-level match; exact line unavailable |
+| 48    | Partial DWARF — file inferred from `.debug_line` table |
+| 28    | Heuristic — source path inferred from mangled symbol name |
+| 22    | Heuristic — source path inferred from `Cargo.toml` discovery |
+| 0     | Unresolved — no source location could be produced |
+
+### Stages in the DWARF mapping pipeline
+
+| Stage             | Description |
+|-------------------|-------------|
+| `input_guard`     | WASM data too small to contain valid content |
+| `full_dwarf`      | Complete DWARF line-number tables |
+| `partial_dwarf`   | File names extracted from `.debug_line` when `.debug_info` is stripped |
+| `symbol_heuristic`| Source path inferred from Rust mangled symbols in WASM name section |
+| `cargo_manifest`  | Source root inferred from `Cargo.toml` found in the project tree |
+| `none`            | All stages exhausted without a resolution |
+
+### Stages in the source-discovery pipeline
+
+| Stage            | Description |
+|------------------|-------------|
+| `build_manifest` | `glassbox-build-manifest.json` provides the source root directly |
+| `cache`          | Previously resolved source returned from local cache |
+| `registry`       | Verified source fetched from stellar.expert |
+| `github`         | Source retrieved from GitHub via the configured retriever |
+| `local_override` | Explicit `--contract-source` path used |
+| `none`           | All stages exhausted; `--skip-source-mapping` or `--contract-source` needed |
+
 ## Automatic Discovery
 
 When a contract fails, Glassbox attempts to resolve the source location through
