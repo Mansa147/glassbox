@@ -48,6 +48,17 @@ type Data struct {
 	ResultMetaXdr string    `json:"result_meta_xdr"`
 	PinnedEndpoint string   `json:"pinned_endpoint,omitempty"`
 
+	// Revision is a monotonically increasing counter used for optimistic
+	// concurrency control [Issue #813].  It is incremented by Store.Save on
+	// every successful write.  Callers that supply a non-zero Revision to
+	// Save will have their write rejected with ErrSessionConflict when the
+	// on-disk revision has advanced past the supplied value, indicating that
+	// another process saved the session in the meantime.
+	//
+	// A zero value means "no revision check requested" and is the default for
+	// sessions created before this field existed.
+	Revision int64 `json:"revision,omitempty"`
+
 	// Audit Chain Integrity [Issue #330]
 	AuditHash           string `json:"audit_hash,omitempty"`            // SHA-256 of the session payload
 	AuditSignature      string `json:"audit_signature,omitempty"`       // Ed25519 signature of the AuditHash
@@ -205,6 +216,7 @@ func (s *Store) initSchema() error {
 		env_fingerprint TEXT,
 		provenance_json TEXT,
 		annotations_json TEXT,
+		revision INTEGER NOT NULL DEFAULT 0,
 		GLASSBOX_version TEXT,
 		schema_version INTEGER NOT NULL
 	);
@@ -233,6 +245,10 @@ func (s *Store) initSchema() error {
 		return err
 	}
 	if err := s.ensureColumn("sessions", "encrypted_payload", "TEXT"); err != nil {
+		return err
+	}
+	// revision column for optimistic concurrency control [Issue #813].
+	if err := s.ensureColumn("sessions", "revision", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_name ON sessions(name) WHERE name IS NOT NULL AND name != ''`); err != nil {
@@ -399,6 +415,34 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		data.EnvFingerprint = BuildEnvFingerprint()
 	}
 
+	// ── Advisory locking [Issue #813] ────────────────────────────────────────
+	// Acquire the per-session advisory lock before touching the database so
+	// that concurrent writers serialise instead of racing.  The lock is
+	// released unconditionally once the SQL write completes.
+	lock, lockErr := AcquireLock(data.ID)
+	if lockErr != nil {
+		return fmt.Errorf("failed to acquire session lock: %w", lockErr)
+	}
+	defer lock.Release()
+
+	// ── Optimistic revision check [Issue #813] ────────────────────────────
+	// If the caller loaded the session before editing it, it will have
+	// populated data.Revision with the value it read.  We read the current
+	// on-disk revision inside the advisory lock and reject the write if
+	// another process incremented it in the meantime.
+	if data.Revision > 0 {
+		diskRevision, revErr := s.loadRevision(ctx, data.ID)
+		if revErr == nil && diskRevision != data.Revision {
+			return &ConflictError{
+				SessionID:        data.ID,
+				ExpectedRevision: data.Revision,
+				ActualRevision:   diskRevision,
+			}
+		}
+	}
+	// Increment the revision counter for this write.
+	data.Revision++
+
 	// Encryption [Issue #560]: when this Store was configured with a key
 	// provider, every save through it seals the sensitive payload fields
 	// before they touch disk. EncryptSessionPayload fails closed — if the
@@ -422,8 +466,8 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 		audit_hash, audit_signature, previous_session_hash,
 		sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
-		encrypted_payload, GLASSBOX_version, schema_version
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		encrypted_payload, revision, GLASSBOX_version, schema_version
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		last_access_at = excluded.last_access_at,
@@ -445,7 +489,8 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		annotations_json = excluded.annotations_json,
 		GLASSBOX_version = excluded.GLASSBOX_version,
 		schema_version = excluded.schema_version,
-		encrypted_payload = excluded.encrypted_payload
+		encrypted_payload = excluded.encrypted_payload,
+		revision = excluded.revision
 	`
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -454,15 +499,47 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr, data.PinnedEndpoint,
 		data.AuditHash, data.AuditSignature, data.PreviousSessionHash,
 		data.SimRequestJSON, data.SimResponseJSON, data.EnvFingerprint, data.ProvenanceJSON, data.AnnotationsJSON,
-		encryptedPayloadJSON, data.ErstVersion, data.SchemaVersion,
+		encryptedPayloadJSON, data.Revision, data.ErstVersion, data.SchemaVersion,
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
-	logger.Logger.Debug("Session saved", "id", data.ID, "tx_hash", data.TxHash)
+	logger.Logger.Debug("Session saved", "id", data.ID, "tx_hash", data.TxHash, "revision", data.Revision)
 	return nil
+}
+
+// SaveForce persists a session unconditionally, bypassing the optimistic
+// revision check.  Use this only when the caller has already examined the
+// conflict (e.g. via Save returning ConflictError) and decided to overwrite
+// the newer version.  The advisory lock is still acquired so concurrent
+// force-saves are serialised safely.
+//
+// SaveForce resets data.Revision to 0 before saving so the normal optimistic
+// path can resume from a clean baseline after the forced overwrite.
+func (s *Store) SaveForce(ctx context.Context, data *Data) error {
+	if data == nil {
+		return fmt.Errorf("session data must not be nil")
+	}
+	// Zero the revision so Save skips the optimistic check.
+	data.Revision = 0
+	return s.Save(ctx, data)
+}
+
+// loadRevision reads only the revision column for sessionID.
+// Returns (0, nil) when the session does not yet exist in the store.
+func (s *Store) loadRevision(ctx context.Context, sessionID string) (int64, error) {
+	const q = `SELECT COALESCE(revision, 0) FROM sessions WHERE id = ?`
+	var rev int64
+	err := s.db.QueryRowContext(ctx, q, sessionID).Scan(&rev)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to read session revision: %w", err)
+	}
+	return rev, nil
 }
 
 // SavePreservingSchemaVersion persists a session without bumping schema_version
@@ -527,7 +604,7 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
 	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
-	       encrypted_payload, GLASSBOX_version, schema_version
+	       encrypted_payload, COALESCE(revision, 0), GLASSBOX_version, schema_version
 	FROM sessions
 	WHERE id = ?
 	`
@@ -541,7 +618,7 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 		&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
 		&auditHash, &auditSignature, &prevSessionHash,
 		&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON,
-		&encryptedPayload, &data.ErstVersion, &data.SchemaVersion,
+		&encryptedPayload, &data.Revision, &data.ErstVersion, &data.SchemaVersion,
 	)
 	if envFP.Valid {
 		data.EnvFingerprint = envFP.String
@@ -656,7 +733,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       audit_hash, audit_signature, previous_session_hash,
 	       sim_request_json, sim_response_json, env_fingerprint, provenance_json, annotations_json,
-	       encrypted_payload, GLASSBOX_version, schema_version
+	       encrypted_payload, COALESCE(revision, 0), GLASSBOX_version, schema_version
 	FROM sessions
 	ORDER BY last_access_at DESC
 	`
@@ -696,7 +773,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 			&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &data.PinnedEndpoint,
 			&auditHash, &auditSignature, &previousSessionHash,
 			&data.SimRequestJSON, &data.SimResponseJSON, &envFP, &provenanceJSON, &annotationsJSON,
-			&encryptedPayload, &data.ErstVersion, &data.SchemaVersion,
+			&encryptedPayload, &data.Revision, &data.ErstVersion, &data.SchemaVersion,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", scanErr)

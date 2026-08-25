@@ -36,6 +36,9 @@ var userErrorCodes = map[errors.ErstErrorCode]bool{
 	errors.ErstUnauthorized:        true,
 	errors.ErstInvalidNetwork:      true,
 	errors.ErstNetworkNotFound:     true,
+	// Session concurrency errors are user-actionable (retry or use --force).
+	errors.ErstSessionConflict: true,
+	errors.ErstSessionLockHeld: true,
 }
 
 // configErrorCodes are ErstErrorCodes that map to ExitConfigError.

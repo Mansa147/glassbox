@@ -88,6 +88,13 @@ var (
 	// structural validation at the RPC boundary (missing required fields,
 	// wrong types, or invalid error envelope shape).
 	ErrRPCInvalidResponse = stdliberrors.New("RPC response failed validation")
+	// ErrSessionConflict is returned when a concurrent writer has already
+	// advanced the session revision past the value the caller last read
+	// [Issue #813].
+	ErrSessionConflict = stdliberrors.New("session write conflict")
+	// ErrSessionLockHeld is returned when the advisory lock for a session is
+	// currently held by another live process [Issue #813].
+	ErrSessionLockHeld = stdliberrors.New("session advisory lock is held by another process")
 )
 
 type LedgerNotFoundError struct {
@@ -447,6 +454,36 @@ func WrapSourceDiscoveryFailed(contractID string, hint string) error {
 	}
 }
 
+// WrapSessionConflict returns a structured error for a session write conflict
+// (concurrent-writer race, Issue #813).
+func WrapSessionConflict(sessionID string, expected, actual int64) error {
+	return &ErstError{
+		Code: ErstSessionConflict,
+		Message: fmt.Sprintf(
+			"session %q write conflict: expected revision %d but disk has revision %d",
+			sessionID, expected, actual,
+		),
+		Hint: "Another Glassbox process saved this session while you were editing it. " +
+			"Run 'glassbox session resume " + sessionID + "' to reload the latest version, " +
+			"or re-run your save with --force to overwrite it.",
+	}
+}
+
+// WrapSessionLockHeld returns a structured error when the advisory lock for a
+// session is currently held by a live process (Issue #813).
+func WrapSessionLockHeld(sessionID string, holderPID int) error {
+	return &ErstError{
+		Code: ErstSessionLockHeld,
+		Message: fmt.Sprintf(
+			"session %q advisory lock is held by process %d",
+			sessionID, holderPID,
+		),
+		Hint: "Another Glassbox instance is currently saving this session. " +
+			"Wait for it to finish and retry. If the other process has crashed, " +
+			"the lock will be cleared automatically after 5 minutes.",
+	}
+}
+
 // LedgerSequenceMismatchError is returned when a transaction's referenced
 // ledger sequence does not match the sequence in the current replay state.
 type LedgerSequenceMismatchError struct {
@@ -529,6 +566,9 @@ var codeToSentinel = map[ErstErrorCode]error{
 	CodeSimProtoUnsup:          ErrProtocolUnsupported,
 	CodeValidationFailed:       ErrValidationFailed,
 	CodeConfigFailed:           ErrConfigFailed,
+	// Session concurrency [Issue #813]
+	ErstSessionConflict: ErrSessionConflict,
+	ErstSessionLockHeld: ErrSessionLockHeld,
 }
 
 // newErstError is the internal constructor.

@@ -38,6 +38,9 @@ const (
 	ErstSourceDiscoveryFailed ErstErrorCode = "SOURCE_DISCOVERY_FAILED"
 	// RPC response validation
 	ErstRPCInvalidResponse ErstErrorCode = "RPC_INVALID_RESPONSE"
+	// Session concurrency [Issue #813]
+	ErstSessionConflict ErstErrorCode = "SESSION_WRITE_CONFLICT"
+	ErstSessionLockHeld ErstErrorCode = "SESSION_LOCK_HELD"
 )
 
 // ErstError wraps an error with a standardized code and preserves the original error string.
@@ -112,6 +115,8 @@ var errorCodeRegistry = map[error]ErstErrorCode{
 	ErrNetworkNotFound:       ErstNetworkNotFound,
 	ErrSourceDiscoveryFailed: ErstSourceDiscoveryFailed,
 	ErrRPCInvalidResponse:    ErstRPCInvalidResponse,
+	ErrSessionConflict:       ErstSessionConflict,
+	ErrSessionLockHeld:       ErstSessionLockHeld,
 }
 
 // ClassifyError maps an error to an ErstError with a code and preserves the original error string.

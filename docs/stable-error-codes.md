@@ -98,6 +98,13 @@ are always consistent.
 |---|---|---|
 | `SOURCE_DISCOVERY_FAILED` | Source mapping unavailable for contract | 3 |
 
+### Session concurrency (#813)
+
+| Code | Meaning | Exit |
+|---|---|---|
+| `SESSION_WRITE_CONFLICT` | A concurrent writer saved a newer revision; reload or use `--force` | 1 |
+| `SESSION_LOCK_HELD` | Advisory lock held by a live process; retry after it exits | 1 |
+
 ## Adding a new code
 
 1. Add the constant to `internal/errors/glassbox_error_code.go`.
