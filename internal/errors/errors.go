@@ -95,6 +95,11 @@ var (
 	// ErrSessionLockHeld is returned when the advisory lock for a session is
 	// currently held by another live process [Issue #813].
 	ErrSessionLockHeld = stdliberrors.New("session advisory lock is held by another process")
+	// ErrAnalysisTruncated is returned when the Go-side analysis pipeline was
+	// halted early due to a resource budget (timeout, max nodes, depth, or
+	// input bytes) being exhausted [Issue #838].  Partial findings already
+	// emitted are valid; deeper subtree findings are absent.
+	ErrAnalysisTruncated = stdliberrors.New("analysis truncated: resource budget exhausted")
 )
 
 type LedgerNotFoundError struct {
@@ -509,6 +514,23 @@ func WrapLedgerSequenceMismatch(txSeq, replaySeq uint32) error {
 	return &LedgerSequenceMismatchError{TxSequence: txSeq, ReplaySequence: replaySeq}
 }
 
+// WrapAnalysisTruncated returns a structured error indicating that the analysis
+// pipeline was halted early because a resource budget was exhausted [Issue #838].
+// phase identifies which phase was truncated (e.g. "depth_analysis",
+// "cost_annotation", "source_scan", "parser"), and reason names the budget that
+// triggered truncation (e.g. "timeout", "max_nodes", "max_depth", "max_bytes").
+// Callers must never present the accompanying partial findings as complete.
+func WrapAnalysisTruncated(phase, reason string) error {
+	return &ErstError{
+		Code:    ErstAnalysisTruncated,
+		Message: fmt.Sprintf("analysis phase %q truncated: %s budget exhausted", phase, reason),
+		Hint: "The analyzer reached a configured resource limit before completing. " +
+			"Reported findings are from the portion of the trace that was visited and are valid, " +
+			"but findings that required deeper traversal are absent. " +
+			"Raise --analyzer-timeout, --max-nodes, --max-depth, or --max-input-bytes to analyze the full trace.",
+	}
+}
+
 const (
 	// RPC origin
 	CodeRPCConnectionFailed  ErstErrorCode = "RPC_CONNECTION_FAILED"
@@ -569,6 +591,8 @@ var codeToSentinel = map[ErstErrorCode]error{
 	// Session concurrency [Issue #813]
 	ErstSessionConflict: ErrSessionConflict,
 	ErstSessionLockHeld: ErrSessionLockHeld,
+	// Analyzer resource budgets [Issue #838]
+	ErstAnalysisTruncated: ErrAnalysisTruncated,
 }
 
 // newErstError is the internal constructor.

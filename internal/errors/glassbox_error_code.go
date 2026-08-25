@@ -41,6 +41,14 @@ const (
 	// Session concurrency [Issue #813]
 	ErstSessionConflict ErstErrorCode = "SESSION_WRITE_CONFLICT"
 	ErstSessionLockHeld ErstErrorCode = "SESSION_LOCK_HELD"
+	// Analyzer resource budgets [Issue #838]
+	// ErstAnalysisTruncated is returned when the Go-side analysis pipeline
+	// (depth analyzer, cost annotator, source detector, or parser) was halted
+	// early because a configured resource budget — wall-clock timeout, maximum
+	// graph nodes, recursion depth, or input bytes — was exhausted.  Any
+	// findings emitted before truncation remain valid; findings that would
+	// have required visiting the unvisited portion are absent.
+	ErstAnalysisTruncated ErstErrorCode = "ANALYSIS_TRUNCATED"
 )
 
 // ErstError wraps an error with a standardized code and preserves the original error string.
@@ -117,6 +125,7 @@ var errorCodeRegistry = map[error]ErstErrorCode{
 	ErrRPCInvalidResponse:    ErstRPCInvalidResponse,
 	ErrSessionConflict:       ErstSessionConflict,
 	ErrSessionLockHeld:       ErstSessionLockHeld,
+	ErrAnalysisTruncated:     ErstAnalysisTruncated,
 }
 
 // ClassifyError maps an error to an ErstError with a code and preserves the original error string.
