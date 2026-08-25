@@ -315,6 +315,16 @@ func (s *KMSSigner) Algorithm() string {
 	return "ECDSA_SHA_512"
 }
 
+// KeyOrigin returns non-sensitive metadata about the KMS signing key.
+// The key fingerprint is derived from the KMS key ID.
+func (s *KMSSigner) KeyOrigin() KeyOriginMetadata {
+	return KeyOriginMetadata{
+		Provider:       "aws-kms",
+		Algorithm:      "ECDSA_SHA_512",
+		KeyFingerprint: s.keyIDHex,
+	}
+}
+
 // IdempotencyStats returns the current size of the in-memory idempotency
 // cache. Exposed for diagnostics and tests; safe for concurrent use.
 func (s *KMSSigner) IdempotencyStats() int {

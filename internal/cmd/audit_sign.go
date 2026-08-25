@@ -97,6 +97,7 @@ type SignedAuditLog struct {
 	Signature  string               `json:"signature"`
 	PublicKey  string               `json:"public_key"`
 	Provider   string               `json:"provider"`
+	KeyOrigin  *signer.KeyOriginMetadata `json:"key_origin,omitempty"`
 	Provenance *SignatureProvenance `json:"provenance,omitempty"`
 	Payload    json.RawMessage      `json:"payload"`
 }
@@ -310,7 +311,30 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	hash := sha256.Sum256(canonicalPayload)
+	// Retrieve key-origin metadata before signing so it can be covered by the
+	// signature.  The metadata is non-sensitive (no PINs, no private key material).
+	keyOrigin := signerImpl.KeyOrigin()
+	keyOrigin.Provider = providerName
+
+	// Build the hash input: canonical payload + provider + key origin metadata.
+	// Including provider and key-origin in the hash ensures that any tampering
+	// with these fields after signing invalidates the signature.
+	type signedInput struct {
+		Payload   json.RawMessage          `json:"payload"`
+		Provider  string                   `json:"provider"`
+		KeyOrigin signer.KeyOriginMetadata `json:"key_origin"`
+	}
+	si := signedInput{
+		Payload:   json.RawMessage(canonicalPayload),
+		Provider:  providerName,
+		KeyOrigin: keyOrigin,
+	}
+	hashInputBytes, err := marshalCanonical(si)
+	if err != nil {
+		return errors.WrapMarshalFailed(err)
+	}
+
+	hash := sha256.Sum256(hashInputBytes)
 	signature, err := signerImpl.Sign(hash[:])
 	if err != nil {
 		return errors.WrapValidationError(fmt.Sprintf("signing failed: %v", err))
@@ -328,6 +352,7 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 		Signature: hex.EncodeToString(signature),
 		PublicKey: hex.EncodeToString(publicKey),
 		Provider:  providerName,
+		KeyOrigin: &keyOrigin,
 		Payload:   json.RawMessage(payloadBytes),
 	}
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dotandev/glassbox/internal/manifest"
+	"github.com/dotandev/glassbox/internal/signer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +35,12 @@ func (s *inMemorySigner) Sign(data []byte) ([]byte, error) {
 }
 func (s *inMemorySigner) PublicKey() ([]byte, error) { return s.pub, nil }
 func (s *inMemorySigner) Algorithm() string          { return "ed25519" }
+func (s *inMemorySigner) KeyOrigin() signer.KeyOriginMetadata {
+	return signer.KeyOriginMetadata{
+		Provider:  "software",
+		Algorithm: "ed25519",
+	}
+}
 
 // writeTemp writes content to a temporary file and returns its path and the
 // directory that contains it.
