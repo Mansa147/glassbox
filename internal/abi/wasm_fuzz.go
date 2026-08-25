@@ -55,7 +55,7 @@ func FuzzAnalyzeWasmSize(f *testing.F) {
 	f.Add(make([]byte, 500)) // Larger input
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, err := AnalyzeWasmSize(data, "test.wasm")
+		_, err := AnalyzeWasmSize(data)
 		_ = err // Expect errors for malformed WASM, but no panics
 	})
 }
@@ -68,7 +68,7 @@ func FuzzParseWasmContractSpec(f *testing.F) {
 	f.Add([]byte{}) // Empty
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, err := ParseWasmContractSpec(data)
+		_, err := DecodeContractSpec(data)
 		_ = err // Expect errors for malformed JSON, but no panics
 	})
 }

@@ -438,16 +438,10 @@ mutation-test-ci: mutation-test-install
 		$(MUTATION_PACKAGES) \
 		2>&1 | tee "$(MUTATION_REPORT_DIR)/gremlins.log"
 
-# Generate a human-readable summary from the last JSON report.
-# Prints surviving mutants grouped by package so contributors know where to
-# add tests.  Requires the JSON report to exist (run mutation-test first).
-mutation-test-report:
-	@if [ ! -f "$(MUTATION_REPORT_DIR)/gremlins-report.json" ]; then \
-		echo "No report found.  Run 'make mutation-test' first."; \
-		exit 1; \
-	fi
-	@echo "=== Mutation Test Summary ==="
-	@python3 - "$(MUTATION_REPORT_DIR)/gremlins-report.json" "$(MUTATION_THRESHOLD)" <<'PYEOF'
+# Python script used by mutation-test-report.  Using define/endef avoids the
+# GNU Make "missing separator" error that occurs when unindented Python code
+# appears after a heredoc opener inside a recipe.
+define MUTATION_REPORT_SCRIPT
 import json, sys, collections
 
 report_path = sys.argv[1]
@@ -477,16 +471,29 @@ if survived:
     for pkg in sorted(by_pkg):
         print(f"  {pkg} ({len(by_pkg[pkg])} mutant(s))")
         for m in by_pkg[pkg][:5]:
-            print(f"    • {m.get('file','?')}:{m.get('line','?')} — {m.get('mutation_type','?')}")
+            print(f"    - {m.get('file','?')}:{m.get('line','?')} - {m.get('mutation_type','?')}")
         if len(by_pkg[pkg]) > 5:
-            print(f"    … and {len(by_pkg[pkg])-5} more (see full report)")
+            print(f"    ... and {len(by_pkg[pkg])-5} more (see full report)")
 
 if score < threshold:
     print(f"\nFAIL: mutation score {score}% is below threshold {threshold}%")
     sys.exit(1)
 else:
     print(f"\nPASS: mutation score {score}% meets threshold {threshold}%")
-PYEOF
+endef
+export MUTATION_REPORT_SCRIPT
+
+# Generate a human-readable summary from the last JSON report.
+# Prints surviving mutants grouped by package so contributors know where to
+# add tests.  Requires the JSON report to exist (run mutation-test first).
+mutation-test-report:
+	@if [ ! -f "$(MUTATION_REPORT_DIR)/gremlins-report.json" ]; then \
+		echo "No report found.  Run 'make mutation-test' first."; \
+		exit 1; \
+	fi
+	@echo "=== Mutation Test Summary ==="
+	@printf '%s\n' "$$MUTATION_REPORT_SCRIPT" | \
+		python3 - "$(MUTATION_REPORT_DIR)/gremlins-report.json" "$(MUTATION_THRESHOLD)"
 
 # ──────────────────────────────────────────────
 # Dependency Compatibility testing

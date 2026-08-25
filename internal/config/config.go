@@ -187,6 +187,7 @@ var defaultConfig = &Config{
 	RequestTimeout:      defaultRequestTimeout,
 	TelemetryEnabled:    false,
 	TelemetrySampleRate: 1.0,
+	TelemetryAnonymized: true,
 	MaxCacheSize:        0,
 	MaxTraceDepth:       50,
 	FailureThreshold:    defaultFailureThreshold,

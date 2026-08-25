@@ -196,3 +196,119 @@ func TestRedactConfigMap(t *testing.T) {
 	assert.Equal(t, "testnet", redacted["GLASSBOX_NETWORK"])
 	assert.Equal(t, "debug", redacted["log_level"])
 }
+
+// ── #843: privacy contract additions ─────────────────────────────────────────
+
+// TestIsSecretFile_MarkerFiles verifies that well-known credential files are
+// classified as secret and would be excluded from scanning.
+func TestIsSecretFile_MarkerFiles(t *testing.T) {
+	secretPaths := []string{
+		"/home/user/.env",
+		"/home/user/id_rsa",
+		"/home/user/.ssh/id_ed25519",
+		"/home/user/credentials",
+		"C:\\Users\\bob\\id_dsa",
+		"/etc/ssl/private/cert.pem",
+		"token.key",
+		"keystore.json",
+		"wallet.p12",
+		".netrc",
+		".npmrc",
+	}
+	for _, p := range secretPaths {
+		assert.True(t, diagnostics.IsSecretFile(p), "expected %q to be classified as a secret file", p)
+	}
+}
+
+// TestIsSecretFile_SafeFiles verifies that normal source and config files are
+// not misclassified as secret.
+func TestIsSecretFile_SafeFiles(t *testing.T) {
+	safePaths := []string{
+		"/home/user/.bashrc",
+		"/etc/glassbox/config.toml",
+		"main.go",
+		"config.json",
+		"README.md",
+		"glassbox.toml",
+	}
+	for _, p := range safePaths {
+		assert.False(t, diagnostics.IsSecretFile(p), "expected %q NOT to be classified as a secret file", p)
+	}
+}
+
+// TestGenerateBundle_ManifestContainsPolicy asserts that the manifest includes
+// a redaction policy with a collector version and non-empty inventory.
+func TestGenerateBundle_ManifestContainsPolicy(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "diag.gbdiag")
+
+	_, err := diagnostics.GenerateBundle(context.Background(), diagnostics.BundleOptions{
+		OutputPath: out,
+	})
+	require.NoError(t, err)
+
+	zr, err := zip.OpenReader(out)
+	require.NoError(t, err)
+	defer zr.Close()
+
+	var manifest diagnostics.Manifest
+	for _, f := range zr.File {
+		if f.Name != "manifest.json" {
+			continue
+		}
+		rc, err := f.Open()
+		require.NoError(t, err)
+		defer rc.Close()
+		require.NoError(t, json.NewDecoder(rc).Decode(&manifest))
+	}
+
+	assert.NotEmpty(t, manifest.Policy.CollectorVersion, "policy must include a collector version")
+	assert.NotEmpty(t, manifest.Policy.Inventory, "policy inventory must be non-empty")
+	assert.False(t, manifest.Policy.VerboseMode, "default bundle should have verbose=false")
+}
+
+// TestGenerateBundle_VerboseFlag propagates to the manifest policy.
+func TestGenerateBundle_VerboseFlag(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "verbose.gbdiag")
+
+	_, err := diagnostics.GenerateBundle(context.Background(), diagnostics.BundleOptions{
+		OutputPath: out,
+		Verbose:    true,
+	})
+	require.NoError(t, err)
+
+	zr, err := zip.OpenReader(out)
+	require.NoError(t, err)
+	defer zr.Close()
+
+	var manifest diagnostics.Manifest
+	for _, f := range zr.File {
+		if f.Name != "manifest.json" {
+			continue
+		}
+		rc, err := f.Open()
+		require.NoError(t, err)
+		defer rc.Close()
+		require.NoError(t, json.NewDecoder(rc).Decode(&manifest))
+	}
+
+	assert.True(t, manifest.Policy.VerboseMode, "verbose bundle should have verbose=true")
+}
+
+// TestInspectManifest_ListsFields verifies that InspectManifest returns a
+// non-empty description with field classification labels.
+func TestInspectManifest_ListsFields(t *testing.T) {
+	out := diagnostics.InspectManifest(false)
+	assert.Contains(t, out, "redacted", "inventory should list fields classified as redacted")
+	assert.Contains(t, out, "safe", "inventory should list fields classified as safe")
+	assert.Contains(t, out, "[REDACTED]", "description should mention the redaction placeholder")
+}
+
+// TestPathAllowedForScan_BlocksSecretFiles verifies the path allowlist rejects
+// credential files regardless of directory.
+func TestPathAllowedForScan_BlocksSecretFiles(t *testing.T) {
+	assert.False(t, diagnostics.PathAllowedForScan("/data/id_rsa"), "id_rsa must be blocked")
+	assert.False(t, diagnostics.PathAllowedForScan("secrets.json"), "secrets.json must be blocked")
+	assert.True(t, diagnostics.PathAllowedForScan("/etc/glassbox/config.toml"), "config.toml must be allowed")
+}

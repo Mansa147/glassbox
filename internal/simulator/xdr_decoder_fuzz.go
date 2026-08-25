@@ -26,7 +26,7 @@ func FuzzDecodeEnvelope(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data string) {
 		// The function under test
-		_, err := DecodeEnvelope(data)
+		_, err := DecodeEnvelopeXDR(data)
 		
 		// We expect errors for malformed input, but no panics
 		_ = err

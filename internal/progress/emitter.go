@@ -4,7 +4,6 @@
 package progress
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/dotandev/glassbox/internal/telemetry"

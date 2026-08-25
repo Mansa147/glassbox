@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/logger"
+	"github.com/dotandev/glassbox/internal/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -14,6 +14,65 @@ import (
 // ManifestSchemaVersion is incremented whenever the manifest layout changes.
 const ManifestSchemaVersion = 1
 
+// collectorVersion is the semantic version of this bundle collector.
+// Increment when the collected field set or redaction policy changes.
+const collectorVersion = "1.0.0"
+
+// FieldClassification describes how a collected field is handled before it
+// reaches the archive.
+type FieldClassification string
+
+const (
+	// FieldSafe means the value is included verbatim in all modes.
+	FieldSafe FieldClassification = "safe"
+	// FieldRedacted means the value is always replaced with [REDACTED].
+	FieldRedacted FieldClassification = "redacted"
+	// FieldMasked means the home directory prefix is replaced with ~.
+	FieldMasked FieldClassification = "masked"
+	// FieldVerbose means the field is only collected when VerboseMode is true.
+	FieldVerbose FieldClassification = "verbose"
+	// FieldOmitted means the field is never collected.
+	FieldOmitted FieldClassification = "omitted"
+)
+
+// FieldEntry documents one collected field in the manifest inventory.
+type FieldEntry struct {
+	Name           string              `json:"name"`
+	Classification FieldClassification `json:"classification"`
+	Description    string              `json:"description"`
+}
+
+// RedactionPolicy is embedded in every manifest so that recipients can verify
+// exactly what was collected and how sensitive values were treated.
+type RedactionPolicy struct {
+	CollectorVersion string       `json:"collector_version"`
+	VerboseMode      bool         `json:"verbose_mode"`
+	Inventory        []FieldEntry `json:"inventory"`
+}
+
+// defaultFieldInventory returns the canonical list of collected fields and
+// their classifications.  This is the source of truth for the privacy contract.
+func defaultFieldInventory() []FieldEntry {
+	return []FieldEntry{
+		{Name: "meta.glassbox_version", Classification: FieldSafe, Description: "binary version string"},
+		{Name: "meta.commit_sha", Classification: FieldSafe, Description: "git commit SHA"},
+		{Name: "meta.build_date", Classification: FieldSafe, Description: "build timestamp"},
+		{Name: "meta.go_version", Classification: FieldSafe, Description: "Go runtime version"},
+		{Name: "platform.os", Classification: FieldSafe, Description: "operating system name"},
+		{Name: "platform.arch", Classification: FieldSafe, Description: "CPU architecture"},
+		{Name: "platform.num_cpu", Classification: FieldSafe, Description: "logical CPU count"},
+		{Name: "platform.hostname", Classification: FieldMasked, Description: "first hostname label only (domain stripped)"},
+		{Name: "config.rpc_url", Classification: FieldMasked, Description: "RPC URL; query string redacted"},
+		{Name: "config.network", Classification: FieldSafe, Description: "Stellar network name"},
+		{Name: "config.log_level", Classification: FieldSafe, Description: "configured log level"},
+		{Name: "config.rpc_token", Classification: FieldRedacted, Description: "always replaced with [REDACTED]"},
+		{Name: "config.crash_sentry_dsn", Classification: FieldRedacted, Description: "always replaced with [REDACTED]"},
+		{Name: "config.crash_endpoint", Classification: FieldRedacted, Description: "always replaced with [REDACTED]"},
+		{Name: "config.cache_path", Classification: FieldMasked, Description: "home dir replaced with ~"},
+		{Name: "checks", Classification: FieldSafe, Description: "doctor check results (pass/fail per dependency)"},
+	}
+}
+
 // Manifest is the top-level document written as manifest.json inside every
 // diagnostics archive.  Every field is safe to share publicly: secrets are
 // redacted by the collector before reaching this struct.
@@ -33,6 +92,10 @@ type Manifest struct {
 
 	// Checks is the list of doctor check results.
 	Checks []CheckResult `json:"checks"`
+
+	// Policy documents the redaction rules and field inventory applied to
+	// this bundle so recipients can verify the privacy contract.
+	Policy RedactionPolicy `json:"policy"`
 
 	// GeneratedAt is the UTC timestamp when the archive was created.
 	GeneratedAt time.Time `json:"generated_at"`

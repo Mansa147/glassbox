@@ -8,6 +8,7 @@ package diagnostics
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -97,4 +98,52 @@ func looksLikeSecretKey(k string) bool {
 		}
 	}
 	return false
+}
+
+// secretFileBasenames is the set of exact basenames that must never be scanned
+// by the diagnostics collector.  These files commonly hold key material.
+var secretFileBasenames = map[string]bool{
+	".env":          true,
+	"id_rsa":        true,
+	"id_ed25519":    true,
+	"id_dsa":        true,
+	"id_ecdsa":      true,
+	".netrc":        true,
+	"credentials":   true,
+	".npmrc":        true,
+	"token":         true,
+	"secret.json":   true,
+	"secrets.json":  true,
+	"keystore.json": true,
+	".htpasswd":     true,
+}
+
+// secretFileExtensions is the set of file extensions whose files must never
+// be scanned by the diagnostics collector.
+var secretFileExtensions = map[string]bool{
+	".pem":  true,
+	".key":  true,
+	".pfx":  true,
+	".p12":  true,
+	".jks":  true,
+	".der":  true,
+	".ovpn": true,
+}
+
+// IsSecretFile returns true when the file at path is a known credential file
+// that must never be read or scanned by the diagnostics collector.
+func IsSecretFile(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	ext := strings.ToLower(filepath.Ext(base))
+	if secretFileExtensions[ext] {
+		return true
+	}
+	return secretFileBasenames[base]
+}
+
+// PathAllowedForScan returns true when it is safe for the diagnostics
+// collector to read the file at path.  Any path classified as a secret file
+// is always excluded regardless of its directory.
+func PathAllowedForScan(path string) bool {
+	return !IsSecretFile(path)
 }

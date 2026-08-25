@@ -194,7 +194,11 @@ func (d *Detector) GetFindingsWithSuppression() DetectorResultWithSuppression {
 	}
 	
 	scopeValue := NormalizeScopeValue(d.scopeValue)
-	return d.suppressionRegistry.ApplyToFindings(d.findings, scopeValue)
+	active, suppressed := d.suppressionRegistry.ApplyToFindings(d.findings, scopeValue)
+	return DetectorResultWithSuppression{
+		ActiveFindings:     active,
+		SuppressedFindings: suppressed,
+	}
 }
 
 func (d *Detector) addFinding(finding Finding) {

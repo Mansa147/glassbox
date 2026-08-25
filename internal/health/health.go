@@ -28,7 +28,9 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,7 +47,45 @@ const (
 	StatusUnavailable StatusValue = "unavailable"
 	// StatusUnknown means the component has not been checked yet.
 	StatusUnknown StatusValue = "unknown"
+	// StatusSkipped means the check was intentionally not run (e.g. offline
+	// mode and the dependency requires network access).
+	StatusSkipped StatusValue = "skipped"
 )
+
+// CheckKind distinguishes between required and optional dependencies.
+// A required dependency failing marks the service not-ready; an optional
+// dependency failing degrades status but does not block readiness.
+type CheckKind string
+
+const (
+	// CheckRequired means the dependency must be healthy for readiness.
+	CheckRequired CheckKind = "required"
+	// CheckOptional means the dependency is informational only.
+	CheckOptional CheckKind = "optional"
+)
+
+// checkMeta holds the registration-time metadata for one checker.
+type checkMeta struct {
+	checker         Checker
+	kind            CheckKind
+	networkRequired bool
+}
+
+// CheckReport is the per-component result in a standalone RunChecks call.
+type CheckReport struct {
+	Status          StatusValue `json:"status"`
+	Message         string      `json:"message,omitempty"`
+	Kind            CheckKind   `json:"kind"`
+	NetworkRequired bool        `json:"network_required"`
+}
+
+// RunResult holds the complete result of a standalone RunChecks call.
+type RunResult struct {
+	Overall    StatusValue            `json:"overall"`
+	Components map[string]CheckReport `json:"components"`
+	Offline    bool                   `json:"offline"`
+	CheckedAt  string                 `json:"checked_at"`
+}
 
 // schemaVersion is embedded in every /healthz response so consumers can
 // detect breaking changes without inspecting field presence.
@@ -119,6 +159,7 @@ type DetailedResponse struct {
 type Handler struct {
 	mu              sync.RWMutex
 	checkers        []Checker
+	meta            []checkMeta
 	protocolVersion int
 	startTime       time.Time
 	// checkTimeout limits the time each Checker.Check call may take.
@@ -134,12 +175,128 @@ func NewHandler() *Handler {
 	}
 }
 
-// Register adds a Checker to the handler. Duplicate names are allowed but
-// each check is run independently; callers should ensure names are unique.
+// Register adds a Checker to the handler as a required, network-transparent
+// dependency.  Duplicate names are allowed but callers should ensure uniqueness.
 func (h *Handler) Register(c Checker) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.checkers = append(h.checkers, c)
+	h.meta = append(h.meta, checkMeta{checker: c, kind: CheckRequired, networkRequired: false})
+}
+
+// RegisterWithMeta adds a Checker with explicit kind and network-access policy.
+// Use CheckOptional for dependencies whose failure should not prevent readiness,
+// and set networkRequired=true for any check that contacts an external endpoint
+// so it can be skipped in offline mode.
+func (h *Handler) RegisterWithMeta(c Checker, kind CheckKind, networkRequired bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.checkers = append(h.checkers, c)
+	h.meta = append(h.meta, checkMeta{checker: c, kind: kind, networkRequired: networkRequired})
+}
+
+// RunChecks executes all registered checkers and returns a RunResult suitable
+// for CLI output.  When offline is true, any checker marked networkRequired is
+// skipped rather than attempted; this prevents hangs on airgapped machines.
+// Checker failures are isolated: one failing check never cancels the others.
+func (h *Handler) RunChecks(ctx context.Context, offline bool) RunResult {
+	h.mu.RLock()
+	metas := make([]checkMeta, len(h.meta))
+	copy(metas, h.meta)
+	timeout := h.checkTimeout
+	h.mu.RUnlock()
+
+	components := make(map[string]CheckReport, len(metas))
+
+	type result struct {
+		name   string
+		report CheckReport
+	}
+	ch := make(chan result, len(metas))
+
+	for _, m := range metas {
+		m := m
+		go func() {
+			name := m.checker.Name()
+			if offline && m.networkRequired {
+				ch <- result{name: name, report: CheckReport{
+					Status:          StatusSkipped,
+					Message:         "skipped in offline mode",
+					Kind:            m.kind,
+					NetworkRequired: m.networkRequired,
+				}}
+				return
+			}
+			checkCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			err := m.checker.Check(checkCtx)
+			status := StatusOK
+			msg := ""
+			if err != nil {
+				status = StatusUnavailable
+				msg = err.Error()
+			}
+			ch <- result{name: name, report: CheckReport{
+				Status:          status,
+				Message:         msg,
+				Kind:            m.kind,
+				NetworkRequired: m.networkRequired,
+			}}
+		}()
+	}
+
+	for i := 0; i < len(metas); i++ {
+		r := <-ch
+		components[r.name] = r.report
+	}
+
+	overall := StatusOK
+	for _, rep := range components {
+		if rep.Status == StatusUnavailable && rep.Kind == CheckRequired {
+			overall = StatusUnavailable
+			break
+		}
+	}
+
+	return RunResult{
+		Overall:    overall,
+		Components: components,
+		Offline:    offline,
+		CheckedAt:  time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// FormatText returns a human-readable summary of a RunResult.  The output
+// separates healthy, degraded, unavailable, and skipped components and
+// never exposes credential values.
+func FormatText(result RunResult) string {
+	var sb strings.Builder
+	sb.WriteString("── Dependency Health ──────────────────────────────\n")
+	if result.Offline {
+		sb.WriteString("  [offline mode — network checks skipped]\n")
+	}
+	for name, rep := range result.Components {
+		marker := "  ✓"
+		switch rep.Status {
+		case StatusUnavailable:
+			marker = "  ✗"
+		case StatusSkipped:
+			marker = "  –"
+		case StatusDegraded:
+			marker = "  !"
+		}
+		kind := ""
+		if rep.Kind == CheckOptional {
+			kind = " (optional)"
+		}
+		line := fmt.Sprintf("%s %-20s %s%s\n", marker, name, rep.Status, kind)
+		sb.WriteString(line)
+		if rep.Message != "" {
+			sb.WriteString(fmt.Sprintf("      %s\n", rep.Message))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("─── overall: %s  checked_at: %s\n", result.Overall, result.CheckedAt))
+	return sb.String()
 }
 
 // SetProtocolVersion stores the current Soroban protocol version for reporting

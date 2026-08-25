@@ -21,9 +21,9 @@ func TestRace_ConcurrentPublishersOnDifferentTopics(t *testing.T) {
 	const emittersPerTopic = 5
 	const emitsPerGoroutine = 100
 
-	var counters []atomic.Int64
+	var counters []*atomic.Int64
 	for i := 0; i < topics; i++ {
-		c := atomic.Int64{}
+		c := new(atomic.Int64)
 		topic := topicName(i)
 		bus.Subscribe(topic, func(payload any) {
 			c.Add(1)

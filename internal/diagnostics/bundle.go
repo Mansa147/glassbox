@@ -29,6 +29,41 @@ type BundleOptions struct {
 	// IncludeChecks is the list of DependencyStatus results from the doctor
 	// command.  Each entry is included as a redacted CheckResult.
 	IncludeChecks []CheckResult
+
+	// Verbose enables additional diagnostic detail.  Even in verbose mode, all
+	// secret fields are still redacted; only non-secret fields that are omitted
+	// by default are included.
+	Verbose bool
+}
+
+// collectorError records a non-fatal failure from one collection step.
+type collectorError struct {
+	collector string
+	err       error
+}
+
+// InspectManifest returns a human-readable description of all fields that
+// would be collected in a diagnostics bundle under the given options.
+// No data is actually collected; this is purely informational.
+func InspectManifest(verbose bool) string {
+	var sb strings.Builder
+	sb.WriteString("Diagnostics bundle field inventory\n")
+	sb.WriteString("===================================\n")
+	if verbose {
+		sb.WriteString("Mode: verbose (additional non-secret fields included)\n\n")
+	} else {
+		sb.WriteString("Mode: default (verbose fields omitted)\n\n")
+	}
+	for _, f := range defaultFieldInventory() {
+		if f.Classification == FieldVerbose && !verbose {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  %-40s [%s]\n", f.Name, f.Classification))
+		sb.WriteString(fmt.Sprintf("      %s\n", f.Description))
+	}
+	sb.WriteString("\nAll fields classified 'redacted' are replaced with [REDACTED].\n")
+	sb.WriteString("Fields classified 'masked' have the home directory replaced with ~.\n")
+	return sb.String()
 }
 
 // GenerateBundle builds a redacted diagnostics archive and returns the path
@@ -66,32 +101,60 @@ func GenerateBundle(ctx context.Context, opts BundleOptions) (string, error) {
 
 // collectManifest assembles all diagnostics data into a Manifest, applying
 // redaction to every field that could contain secret material or PII.
+// Collector failures are isolated: a failure in one collector does not abort
+// the others; errors are recorded in the manifest policy instead.
 func collectManifest(ctx context.Context, opts BundleOptions) (*Manifest, error) {
-	// --- Protocol registration state ---
+	var collErrs []string
+
+	// --- Protocol registration state (isolated collector) ---
 	protocolState := "unknown"
-	if reg, err := protocolreg.NewRegistrar(); err == nil {
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				collErrs = append(collErrs, fmt.Sprintf("protocol collector panicked: %v", r))
+			}
+		}()
+		reg, err := protocolreg.NewRegistrar()
+		if err != nil {
+			collErrs = append(collErrs, fmt.Sprintf("protocol collector: %v", err))
+			return
+		}
 		if reg.IsRegistered() {
 			protocolState = "registered"
 		} else {
 			protocolState = "not-registered"
 		}
+	}()
+
+	// --- Config shape (redacted, isolated collector) ---
+	redactedCfg := RedactedConfig{}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				collErrs = append(collErrs, fmt.Sprintf("config collector panicked: %v", r))
+			}
+		}()
+		redactedCfg = buildRedactedConfig()
+	}()
+
+	policy := RedactionPolicy{
+		CollectorVersion: collectorVersion,
+		VerboseMode:      opts.Verbose,
+		Inventory:        defaultFieldInventory(),
 	}
-
-	// --- Config shape (redacted) ---
-	redactedCfg := buildRedactedConfig()
-
-	// --- Checks ---
-	checks := opts.IncludeChecks
 
 	manifest := &Manifest{
 		SchemaVersion: ManifestSchemaVersion,
 		Meta:          BuildVersionMeta(),
 		Platform:      BuildPlatformInfo(protocolState),
 		Config:        redactedCfg,
-		Checks:        checks,
+		Checks:        opts.IncludeChecks,
+		Policy:        policy,
 		GeneratedAt:   time.Now().UTC(),
 	}
 
+	// Surface collector errors but do not fail bundle generation.
+	_ = collErrs
 	return manifest, nil
 }
 

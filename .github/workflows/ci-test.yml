@@ -68,22 +68,33 @@ jobs:
 
       # Run tests and emit a JUnit-compatible report for GitHub Actions.
       # gotestsum produces machine-readable output; fall back to go test if
-      # gotestsum is not cached.
+      # gotestsum fails to build (e.g. transitive-dep incompatibility).
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.12.0
+        continue-on-error: true
 
       - name: Run unit tests
         id: run_tests
+        shell: bash
         # Write JSON output for downstream processing and JUnit XML for the
         # test report annotation step.
         run: |
           mkdir -p ci-artifacts/unit
-          gotestsum \
-            --format testname \
-            --junitfile ci-artifacts/unit/junit.xml \
-            --jsonfile ci-artifacts/unit/test-output.json \
-            -- -race -coverprofile=ci-artifacts/unit/coverage.out \
-            ./internal/...
+          if gotestsum --version >/dev/null 2>&1; then
+            gotestsum \
+              --format testname \
+              --junitfile ci-artifacts/unit/junit.xml \
+              --jsonfile ci-artifacts/unit/test-output.json \
+              -- -race -coverprofile=ci-artifacts/unit/coverage.out \
+              ./internal/...
+          else
+            echo "gotestsum unavailable, falling back to go test"
+            go test -race -coverprofile=ci-artifacts/unit/coverage.out ./internal/... \
+              2>&1 | tee ci-artifacts/unit/test-output.log
+            FALLBACK_EXIT=${PIPESTATUS[0]}
+            echo '[]' > ci-artifacts/unit/test-output.json
+            exit ${FALLBACK_EXIT}
+          fi
         # Continue so the artifact upload step always runs even on failure.
         continue-on-error: true
 
@@ -152,22 +163,33 @@ jobs:
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.12.0
+        continue-on-error: true
 
       - name: Build glassbox binary
         run: go build -o bin/glassbox ./cmd/glassbox
 
       - name: Run integration tests
         id: run_integration
+        shell: bash
         env:
           GLASSBOX_BINARY: ${{ github.workspace }}/bin/glassbox
         run: |
           mkdir -p ci-artifacts/integration
-          gotestsum \
-            --format testname \
-            --junitfile ci-artifacts/integration/junit.xml \
-            --jsonfile ci-artifacts/integration/test-output.json \
-            -- -v -timeout 120s \
-            ./integration/...
+          if gotestsum --version >/dev/null 2>&1; then
+            gotestsum \
+              --format testname \
+              --junitfile ci-artifacts/integration/junit.xml \
+              --jsonfile ci-artifacts/integration/test-output.json \
+              -- -v -timeout 120s \
+              ./integration/...
+          else
+            echo "gotestsum unavailable, falling back to go test"
+            go test -v -timeout 120s ./integration/... \
+              2>&1 | tee ci-artifacts/integration/test-output.log
+            FALLBACK_EXIT=${PIPESTATUS[0]}
+            echo '[]' > ci-artifacts/integration/test-output.json
+            exit ${FALLBACK_EXIT}
+          fi
         continue-on-error: true
 
       - name: Annotate integration test results
@@ -237,6 +259,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline
+
+      - name: Install jest-junit reporter
+        run: npm install --no-save jest-junit
 
       - name: Run TypeScript tests
         id: run_ts
@@ -318,17 +343,28 @@ jobs:
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.12.0
+        continue-on-error: true
 
       - name: Run regression tests
         id: run_regression
+        shell: bash
         run: |
           mkdir -p ci-artifacts/regression
-          gotestsum \
-            --format testname \
-            --junitfile ci-artifacts/regression/junit.xml \
-            --jsonfile ci-artifacts/regression/test-output.json \
-            -- -v -run TestRegression \
-            ./internal/cmd/... ./integration/...
+          if gotestsum --version >/dev/null 2>&1; then
+            gotestsum \
+              --format testname \
+              --junitfile ci-artifacts/regression/junit.xml \
+              --jsonfile ci-artifacts/regression/test-output.json \
+              -- -v -run TestRegression \
+              ./internal/cmd/... ./integration/...
+          else
+            echo "gotestsum unavailable, falling back to go test"
+            go test -v -run TestRegression ./internal/cmd/... ./integration/... \
+              2>&1 | tee ci-artifacts/regression/test-output.log
+            FALLBACK_EXIT=${PIPESTATUS[0]}
+            echo '[]' > ci-artifacts/regression/test-output.json
+            exit ${FALLBACK_EXIT}
+          fi
         continue-on-error: true
 
       - name: Annotate regression test results

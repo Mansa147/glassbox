@@ -480,3 +480,136 @@ func TestHealth_NeverExpensiveWork(t *testing.T) {
 		t.Errorf("health checks took %v for 50 iterations; potential expensive work", elapsed)
 	}
 }
+
+// ── #842: RunChecks and optional/required dependency policy ──────────────────
+
+func TestRunChecks_AllPass(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newPassChecker("rpc"), CheckRequired, true)
+	h.RegisterWithMeta(newPassChecker("simulator"), CheckRequired, false)
+
+	result := h.RunChecks(context.Background(), false)
+	if result.Overall != StatusOK {
+		t.Errorf("overall want ok, got %q", result.Overall)
+	}
+	if result.Components["rpc"].Status != StatusOK {
+		t.Errorf("rpc want ok, got %q", result.Components["rpc"].Status)
+	}
+}
+
+func TestRunChecks_RequiredFail_OverallUnavailable(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newFailChecker("rpc", "connection refused"), CheckRequired, true)
+	h.RegisterWithMeta(newPassChecker("simulator"), CheckRequired, false)
+
+	result := h.RunChecks(context.Background(), false)
+	if result.Overall != StatusUnavailable {
+		t.Errorf("overall want unavailable, got %q", result.Overall)
+	}
+}
+
+func TestRunChecks_OptionalFail_OverallStillOK(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newPassChecker("rpc"), CheckRequired, false)
+	h.RegisterWithMeta(newFailChecker("signer", "not configured"), CheckOptional, false)
+
+	result := h.RunChecks(context.Background(), false)
+	if result.Overall != StatusOK {
+		t.Errorf("optional failure should not affect overall; want ok, got %q", result.Overall)
+	}
+	if result.Components["signer"].Status != StatusUnavailable {
+		t.Errorf("signer should be unavailable, got %q", result.Components["signer"].Status)
+	}
+}
+
+func TestRunChecks_OfflineSkipsNetworkChecks(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newPassChecker("local"), CheckRequired, false)
+	h.RegisterWithMeta(newPassChecker("rpc"), CheckRequired, true) // network required
+
+	result := h.RunChecks(context.Background(), true /* offline */)
+	if result.Overall != StatusOK {
+		t.Errorf("offline: overall want ok, got %q", result.Overall)
+	}
+	if result.Components["rpc"].Status != StatusSkipped {
+		t.Errorf("offline: rpc should be skipped, got %q", result.Components["rpc"].Status)
+	}
+	if result.Components["local"].Status != StatusOK {
+		t.Errorf("offline: local should still run, got %q", result.Components["local"].Status)
+	}
+}
+
+func TestRunChecks_OfflineFlag_SetInResult(t *testing.T) {
+	h := NewHandler()
+	result := h.RunChecks(context.Background(), true)
+	if !result.Offline {
+		t.Error("RunResult.Offline should be true when called with offline=true")
+	}
+}
+
+func TestRunChecks_CheckedAtRFC3339(t *testing.T) {
+	h := NewHandler()
+	result := h.RunChecks(context.Background(), false)
+	if _, err := time.Parse(time.RFC3339, result.CheckedAt); err != nil {
+		t.Errorf("checked_at is not RFC 3339: %q", result.CheckedAt)
+	}
+}
+
+func TestRunChecks_KindPreservedInReport(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newPassChecker("req"), CheckRequired, false)
+	h.RegisterWithMeta(newPassChecker("opt"), CheckOptional, true)
+
+	result := h.RunChecks(context.Background(), false)
+	if result.Components["req"].Kind != CheckRequired {
+		t.Errorf("req kind want %q, got %q", CheckRequired, result.Components["req"].Kind)
+	}
+	if result.Components["opt"].Kind != CheckOptional {
+		t.Errorf("opt kind want %q, got %q", CheckOptional, result.Components["opt"].Kind)
+	}
+	if !result.Components["opt"].NetworkRequired {
+		t.Error("opt NetworkRequired should be true")
+	}
+}
+
+func TestFormatText_ContainsComponentNames(t *testing.T) {
+	h := NewHandler()
+	h.RegisterWithMeta(newPassChecker("rpc"), CheckRequired, true)
+	h.RegisterWithMeta(newFailChecker("signer", "not found"), CheckOptional, false)
+
+	result := h.RunChecks(context.Background(), false)
+	text := FormatText(result)
+	if !strings.Contains(text, "rpc") {
+		t.Errorf("FormatText output missing 'rpc': %s", text)
+	}
+	if !strings.Contains(text, "signer") {
+		t.Errorf("FormatText output missing 'signer': %s", text)
+	}
+	if !strings.Contains(text, string(result.Overall)) {
+		t.Errorf("FormatText output missing overall status: %s", text)
+	}
+}
+
+func TestFormatText_OfflineModeAnnotated(t *testing.T) {
+	h := NewHandler()
+	result := h.RunChecks(context.Background(), true)
+	text := FormatText(result)
+	if !strings.Contains(text, "offline") {
+		t.Errorf("FormatText should annotate offline mode: %s", text)
+	}
+}
+
+func TestRunChecks_NeverExposesCredentials(t *testing.T) {
+	h := NewHandler()
+	// A checker that returns an error message potentially containing a token.
+	h.RegisterWithMeta(NewChecker("auth", func(_ context.Context) error {
+		return errors.New("dial tcp: connection refused (no credential leak)")
+	}), CheckRequired, false)
+
+	result := h.RunChecks(context.Background(), false)
+	text := FormatText(result)
+	// The error message is allowed in the output but must not be token material.
+	if strings.Contains(text, "Bearer") || strings.Contains(text, "password") {
+		t.Errorf("FormatText should not expose credential tokens: %s", text)
+	}
+}

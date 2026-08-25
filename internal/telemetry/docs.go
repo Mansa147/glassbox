@@ -10,6 +10,13 @@ import (
 	"strings"
 )
 
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(string(s[0])) + string(s[1:])
+}
+
 // GenerateDocs generates a markdown documentation table from the registry.
 func GenerateDocs() string {
 	defs := List()
@@ -29,9 +36,9 @@ func GenerateDocs() string {
 	for _, def := range defs {
 		builder.WriteString(fmt.Sprintf("### %s (v%d)\n\n", def.Name, def.Version))
 		builder.WriteString(fmt.Sprintf("**Owner:** %s  \n", def.Owner))
-		builder.WriteString(fmt.Sprintf("**Stability:** %s  \n", def.Stability))
-		builder.WriteString(fmt.Sprintf("**Sensitivity:** %s  \n", def.Sensitivity))
-		builder.WriteString(fmt.Sprintf("**Retention:** %s  \n\n", def.Retention))
+		builder.WriteString(fmt.Sprintf("**Stability:** %s  \n", capitalizeFirst(string(def.Stability))))
+		builder.WriteString(fmt.Sprintf("**Sensitivity:** %s  \n", capitalizeFirst(string(def.Sensitivity))))
+		builder.WriteString(fmt.Sprintf("**Retention:** %s  \n\n", capitalizeFirst(string(def.Retention))))
 		
 		if def.Description != "" {
 			builder.WriteString(def.Description + "\n\n")
