@@ -212,7 +212,7 @@ func runDiagnostics(cmd *cobra.Command, args []string) error {
 	// Validate before rendering to catch any internal inconsistencies.
 	if issues := ValidateDiagnosticsOutput(&output); len(issues) > 0 {
 		for _, issue := range issues {
-			fmt.Fprintf(os.Stderr, "Warning: diagnostics inconsistency: %s\n", issue)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: diagnostics inconsistency: %s\n", issue)
 		}
 	}
 

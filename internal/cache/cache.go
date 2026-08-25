@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/logger"
+	"github.com/dotandev/glassbox/internal/termctx"
 )
 
 // Config holds cache configuration
@@ -225,6 +226,9 @@ func (m *Manager) Clean(force bool) (*CleanupStatus, error) {
 	fmt.Printf("Maximum size: %s\n", formatBytes(m.config.MaxSizeBytes))
 
 	if !force {
+		if termctx.GlobalNonInteractive() {
+			return status, fmt.Errorf("non-interactive mode: cache clean requires --force to skip confirmation")
+		}
 		fmt.Print("\nThis will delete the oldest cached files. Continue? (yes/no): ")
 		var response string
 		if _, scanErr := fmt.Scanln(&response); scanErr != nil {

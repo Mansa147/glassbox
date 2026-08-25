@@ -137,7 +137,7 @@ func authDebugRunE(cmd *cobra.Command, args []string) error {
 	// --detailed only affects the human-readable report; in JSON mode the full
 	// detail is always emitted. Surface the no-op so the user is not surprised.
 	if authJSONOutputFlag && authDetailedFlag {
-		fmt.Fprintln(os.Stderr, "note: --detailed has no effect together with --json; JSON output already includes full detail")
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: --detailed has no effect together with --json; JSON output already includes full detail")
 	}
 
 	opts := []rpc.ClientOption{rpc.WithToken(authResolveRPCToken())}
@@ -186,16 +186,16 @@ func authDebugRunE(cmd *cobra.Command, args []string) error {
 // verified. Make that explicit so the output is not misread as a pass.
 // Also surface diagnostic hints from the trace, including source mapping guidance.
 if !authTraceHasData(trace) {
-	fmt.Fprintln(os.Stderr, emptyAuthTraceNote(txHash))
+	fmt.Fprintln(cmd.ErrOrStderr(), emptyAuthTraceNote(txHash))
 	if trace.Diagnostics != nil && trace.Diagnostics.EmptyTraceReason != "" {
-		fmt.Fprintf(os.Stderr, "  Detail: %s\n", trace.Diagnostics.EmptyTraceReason)
+		fmt.Fprintf(cmd.ErrOrStderr(), "  Detail: %s\n", trace.Diagnostics.EmptyTraceReason)
 	}
 }
 
 // When some events were recorded but source mapping is missing, provide
 // a targeted hint so users can improve trace-to-source correlation.
 if trace.Diagnostics != nil && !trace.Diagnostics.SourceMappingAvailable && len(trace.AuthEvents) > 0 {
-	fmt.Fprintf(os.Stderr, "  Hint: %s\n", trace.Diagnostics.SourceMappingHint)
+	fmt.Fprintf(cmd.ErrOrStderr(), "  Hint: %s\n", trace.Diagnostics.SourceMappingHint)
 }
 
 	if authJSONOutputFlag {

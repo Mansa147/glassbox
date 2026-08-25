@@ -15,6 +15,7 @@ import (
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/gasmodel"
 	"github.com/dotandev/glassbox/internal/security"
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/dotandev/glassbox/internal/trace"
 	"github.com/dotandev/glassbox/internal/visualizer"
 	"github.com/spf13/cobra"
@@ -219,6 +220,13 @@ Export verification:
 			if _, err := ValidateOutputPath("export-svg", traceExportSVG); err != nil {
 				failures = append(failures, err.Error())
 			}
+		}
+
+		// In non-interactive mode, default to --print output instead of the
+		// interactive viewer, which cannot function without a terminal.
+		if termctx.GlobalNonInteractive() && !tracePrint && traceExportPath == "" && traceExportMarkdown == "" && traceOutputJSON == "" && traceExportSVG == "" {
+			tracePrint = true
+			fmt.Fprintln(cmd.ErrOrStderr(), "Non-interactive mode: falling back to --print output")
 		}
 
 		// --export and --print are mutually exclusive.

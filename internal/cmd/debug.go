@@ -192,10 +192,10 @@ func (d *DebugCommand) runDebug(cmd *cobra.Command, cmdArgs []string) error {
 		return errors.WrapValidationError(fmt.Sprintf("failed to create client: %v", err))
 	}
 
-	fmt.Printf("Debugging transaction: %s\n", txHash)
-	fmt.Printf("Network: %s\n", networkFlag)
+	fmt.Fprintf(cmd.OutOrStdout(), "Debugging transaction: %s\n", txHash)
+	fmt.Fprintf(cmd.OutOrStdout(), "Network: %s\n", networkFlag)
 	if rpcURLFlag != "" {
-		fmt.Printf("RPC URL: %s\n", rpcURLFlag)
+		fmt.Fprintf(cmd.OutOrStdout(), "RPC URL: %s\n", rpcURLFlag)
 	}
 
 	// Fetch transaction details
@@ -204,7 +204,7 @@ func (d *DebugCommand) runDebug(cmd *cobra.Command, cmdArgs []string) error {
 		return errors.WrapRPCConnectionFailed(err)
 	}
 
-	fmt.Printf("Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
+				fmt.Fprintf(cmd.OutOrStdout(), "Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
 
 	simReq := &simulator.SimulationRequest{
 		EnvelopeXdr:   resp.EnvelopeXdr,
@@ -261,30 +261,33 @@ Local WASM Replay Mode:
 	Args: cobra.MaximumNArgs(1),
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		if hotReloadFlag && wasmPath == "" {
-			return errors.WrapValidationError("--hot-reload requires --wasm; provide --wasm <path> to enable hot reload")
+			return errors.WrapValidationError(
+				"--hot-reload requires --wasm; provide --wasm <path> to enable hot reload\n" +
+					"  Example: glassbox debug --wasm ./contract.wasm --hot-reload")
 		}
 
 		// Demo mode, local WASM replay, local envelope file input, and offline
 		// registry load don't need a transaction hash or network connectivity.
 		if xdrFileFlag != "" && jsonFileFlag != "" {
 			return errors.WrapValidationError(
-				"only one of --xdr-file or --json-file may be specified; remove one of the two flags")
+				"only one of --xdr-file or --json-file may be specified\n" +
+					"  Fix: remove one of the two flags — they provide the same local envelope input")
 		}
 		if xdrFileFlag != "" || jsonFileFlag != "" {
 			if len(args) > 0 {
 				return errors.WrapValidationError(
-					"cannot specify both a transaction hash and a local envelope file; " +
-						"use either a hash or --xdr-file/--json-file, not both")
+					"cannot specify both a transaction hash and a local envelope file\n" +
+						"  Fix: use either a hash argument or --xdr-file/--json-file, not both")
 			}
 			if watchFlag {
 				return errors.WrapValidationError(
-					"--watch cannot be used with local envelope input; " +
-						"remove --watch or provide a transaction hash instead")
+					"--watch cannot be used with local envelope input\n" +
+						"  Fix: remove --watch or provide a transaction hash instead of a local file")
 			}
 			if compareNetworkFlag != "" {
 				return errors.WrapValidationError(
-					"--compare-network cannot be used with local envelope input; " +
-						"remove --compare-network or use a transaction hash")
+					"--compare-network cannot be used with local envelope input\n" +
+						"  Fix: remove --compare-network or use a transaction hash")
 			}
 			// Validate the local file exists before proceeding.
 			if xdrFileFlag != "" {
@@ -314,8 +317,9 @@ Local WASM Replay Mode:
 		if len(args) == 0 {
 			return errors.WrapValidationError(
 				"transaction hash is required when not using --wasm, --demo, --xdr-file, or --json-file\n" +
-					"Usage: glassbox debug <transaction-hash>\n" +
-					"Run 'glassbox debug --help' for all available options")
+					"  Usage: glassbox debug <transaction-hash>\n" +
+					"  Example: glassbox debug abc123...def\n" +
+					"  Run 'glassbox debug --help' for all available options")
 		}
 
 		if err := rpc.ValidateTransactionHash(args[0]); err != nil {
@@ -334,7 +338,7 @@ Local WASM Replay Mode:
 			defer probeCancel()
 			if resolved, err := rpc.ResolveNetwork(probeCtx, args[0], token); err == nil {
 				networkFlag = string(resolved)
-				fmt.Printf("Auto-detected network: %s\n", networkFlag)
+				fmt.Fprintf(cmd.OutOrStdout(), "Auto-detected network: %s\n", networkFlag)
 			}
 		}
 
@@ -618,14 +622,14 @@ Local WASM Replay Mode:
 					continue
 				}
 				if trimmedTarget == "" {
-					fmt.Fprintf(os.Stderr,
+					fmt.Fprintf(cmd.ErrOrStderr(),
 						"Warning: --source-alias: target for %q is empty; source mapping for this alias will be skipped\n",
 						trimmedAlias,
 					)
 					continue
 				}
 				if _, targetErr := os.Stat(trimmedTarget); targetErr != nil {
-					fmt.Fprintf(os.Stderr,
+					fmt.Fprintf(cmd.ErrOrStderr(),
 						"Warning: --source-alias: target for %q does not exist: %q — source mapping for this alias will be skipped\n",
 						trimmedAlias, trimmedTarget,
 					)
@@ -838,7 +842,7 @@ Local WASM Replay Mode:
 			uiStore = s
 			defer uiStore.Close()
 			if prev, err := uiStore.LoadSectionState(ctx, txHash); err == nil && len(prev) > 0 {
-				fmt.Printf("Restoring viewer state: last session showed [%s] for this transaction.\n", strings.Join(prev, ", "))
+				fmt.Fprintf(cmd.OutOrStdout(), "Restoring viewer state: last session showed [%s] for this transaction.\n", strings.Join(prev, ", "))
 			}
 		}
 
@@ -938,7 +942,7 @@ Local WASM Replay Mode:
 			}
 			// Lock the provider pool to the pinned endpoint so replay is deterministic.
 			opts = append(opts, rpc.WithReplayPinProvider(pinEndpointFlag))
-			fmt.Printf("Pinned RPC endpoint: %s\n", pinEndpointFlag)
+			fmt.Fprintf(cmd.OutOrStdout(), "Pinned RPC endpoint: %s\n", pinEndpointFlag)
 		}
 
 		client, err := rpc.NewClient(opts...)
@@ -953,7 +957,7 @@ Local WASM Replay Mode:
 
 		if noCacheFlag {
 			client.CacheEnabled = false
-			fmt.Println("🚫 Cache disabled by --no-cache flag")
+			fmt.Fprintln(cmd.OutOrStdout(), "🚫 Cache disabled by --no-cache flag")
 		}
 
 		if !localEnvelopeMode {
@@ -961,13 +965,13 @@ Local WASM Replay Mode:
 		}
 
 		if localEnvelopeMode {
-			fmt.Println("Debugging local transaction envelope")
+			fmt.Fprintln(cmd.OutOrStdout(), "Debugging local transaction envelope")
 		} else {
-			fmt.Printf("Debugging transaction: %s\n", txHash)
+			fmt.Fprintf(cmd.OutOrStdout(), "Debugging transaction: %s\n", txHash)
 		}
-		fmt.Printf("Primary Network: %s\n", networkFlag)
+		fmt.Fprintf(cmd.OutOrStdout(), "Primary Network: %s\n", networkFlag)
 		if compareNetworkFlag != "" {
-			fmt.Printf("Comparing against Network: %s\n", compareNetworkFlag)
+			fmt.Fprintf(cmd.OutOrStdout(), "Comparing against Network: %s\n", compareNetworkFlag)
 		}
 
 		var watchEvents <-chan struct{}
@@ -982,13 +986,14 @@ Local WASM Replay Mode:
 				DebounceWindow: 500 * time.Millisecond,
 			}
 			events, errs := watch.StartFileWatcher(ctx, cfg)
-			watchEvents = events
-			go func() {
-				for err := range errs {
-					fmt.Fprintf(os.Stderr, "Watch error: %v\n", err)
-				}
-			}()
-			fmt.Println("Watching for file changes to rerun debug session...")
+		watchEvents = events
+		errWriter := cmd.ErrOrStderr()
+		go func() {
+			for err := range errs {
+				fmt.Fprintf(errWriter, "Watch error: %v\n", err)
+			}
+		}()
+			fmt.Fprintln(cmd.OutOrStdout(), "Watching for file changes to rerun debug session...")
 		}
 
 	watchLoop:
@@ -1041,15 +1046,15 @@ Local WASM Replay Mode:
 					if localInputNetwork != "" && !cmd.Flags().Changed("network") {
 						networkFlag = localInputNetwork
 					}
-					fmt.Printf("Loaded local transaction envelope from %s\n", func() string {
+					fmt.Fprintf(cmd.OutOrStdout(), "Loaded local transaction envelope from %s\n", func() string {
 						if xdrFileFlag != "" {
 							return xdrFileFlag
 						}
 						return jsonFileFlag
 					}())
-					fmt.Printf("Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
+					fmt.Fprintf(cmd.OutOrStdout(), "Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
 				} else {
-					fmt.Printf("Fetching transaction: %s\n", txHash)
+					fmt.Fprintf(cmd.OutOrStdout(), "Fetching transaction: %s\n", txHash)
 					_t0 := time.Now()
 					doneRPC := diagCollector.Start(diagnostics.PhaseRPCFetch)
 					resp, err = client.GetTransaction(ctx, txHash)
@@ -1061,10 +1066,10 @@ Local WASM Replay Mode:
 						return errors.WrapRPCConnectionFailed(err)
 					}
 
-					fmt.Printf("Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
+	fmt.Fprintf(cmd.OutOrStdout(), "Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
 					// Show which provider succeeded when the pool attempted failover.
 					if diag := client.PoolDiagnostics(); len(diag.Attempts) > 1 {
-						fmt.Printf("Provider failover occurred — succeeded via: %s\n", diag.SucceededURL)
+						fmt.Fprintf(cmd.OutOrStdout(), "Provider failover occurred — succeeded via: %s\n", diag.SucceededURL)
 					}
 				}
 				keys, err := extractLedgerKeys(resp.ResultMetaXdr)
@@ -1119,7 +1124,7 @@ Local WASM Replay Mode:
 
 				for _, ts := range timestamps {
 					if len(timestamps) > 1 {
-						fmt.Printf("\n--- Simulating at Timestamp: %d ---\n", ts)
+						fmt.Fprintf(cmd.OutOrStdout(), "\n--- Simulating at Timestamp: %d ---\n", ts)
 					}
 
 					var simResp *simulator.SimulationResponse
@@ -1136,7 +1141,7 @@ Local WASM Replay Mode:
 							// aware that the ledger state may not match what was originally
 							// captured.
 							if driftWarn != nil {
-								fmt.Fprintf(os.Stderr, "\nWarning: %s\n\n", driftWarn.Error())
+								fmt.Fprintf(cmd.ErrOrStderr(), "\nWarning: %s\n\n", driftWarn.Error())
 							}
 							// Validate the snapshot identity and freshness before replay.
 							currentParams := map[string]string{

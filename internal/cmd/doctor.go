@@ -18,8 +18,10 @@ import (
 
 	"github.com/dotandev/glassbox/internal/config"
 	"github.com/dotandev/glassbox/internal/deeplink"
+	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/rpc"
 	"github.com/dotandev/glassbox/internal/telemetry"
+	"github.com/dotandev/glassbox/internal/termctx"
 
 	"github.com/spf13/cobra"
 )
@@ -658,6 +660,12 @@ func buildDeepLinkFixHint(steps []string) string {
 
 // NEW: runFixers orchestrates automatic fixes with ID-based dispatch (Issues #3, #7, #8)
 func runFixers(deps []DependencyStatus, skipConfirm, verbose bool) error {
+	if !skipConfirm && termctx.GlobalNonInteractive() {
+		return errors.WrapValidationError(
+			"non-interactive mode: --fix requires --yes to skip confirmation prompts in non-interactive environments",
+		)
+	}
+
 	var failedFixes []string
 	var successFixes []string
 

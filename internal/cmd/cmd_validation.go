@@ -67,7 +67,7 @@ func validatePositiveInt(flag string, val int) error {
 }
 
 // validateMutuallyExclusive returns an error when more than one of the named
-// flags is set, listing all conflicting flags in the message.
+// flags is set, listing all conflicting flags in the message with guidance.
 func validateMutuallyExclusive(set map[string]bool, flags ...string) error {
 	var active []string
 	for _, f := range flags {
@@ -76,12 +76,82 @@ func validateMutuallyExclusive(set map[string]bool, flags ...string) error {
 		}
 	}
 	if len(active) > 1 {
+		all := make([]string, len(flags))
+		for i, f := range flags {
+			all[i] = "--" + f
+		}
 		return errors.WrapValidationError(fmt.Sprintf(
-			"flags %s are mutually exclusive — provide only one",
+			"flags %s are mutually exclusive — provide only one\n"+
+				"  Valid alternatives: %s",
 			strings.Join(active, " and "),
+			strings.Join(all, ", "),
 		))
 	}
 	return nil
+}
+
+// validateExactlyOne returns an error unless exactly one of the named flags
+// is set. It reports both the conflict and any missing flags.
+func validateExactlyOne(set map[string]bool, flags ...string) error {
+	var active []string
+	for _, f := range flags {
+		if set[f] {
+			active = append(active, "--"+f)
+		}
+	}
+	all := make([]string, len(flags))
+	for i, f := range flags {
+		all[i] = "--" + f
+	}
+	if len(active) > 1 {
+		return errors.WrapValidationError(fmt.Sprintf(
+			"flags %s are mutually exclusive — provide exactly one\n"+
+				"  Valid alternatives: %s",
+			strings.Join(active, " and "),
+			strings.Join(all, ", "),
+		))
+	}
+	if len(active) == 0 {
+		return errors.WrapValidationError(fmt.Sprintf(
+			"one of the following flags is required: %s",
+			strings.Join(all, ", "),
+		))
+	}
+	return nil
+}
+
+// validateAtLeastOne returns an error when none of the named flags are set.
+func validateAtLeastOne(set map[string]bool, flags ...string) error {
+	for _, f := range flags {
+		if set[f] {
+			return nil
+		}
+	}
+	all := make([]string, len(flags))
+	for i, f := range flags {
+		all[i] = "--" + f
+	}
+	return errors.WrapValidationError(fmt.Sprintf(
+		"at least one of the following flags is required: %s",
+		strings.Join(all, ", "),
+	))
+}
+
+// validateEnum returns an error when value is not one of the allowed values.
+// The context parameter describes what is being validated (e.g., "--theme", "format").
+func validateEnum(context, value string, allowed []string) error {
+	if value == "" {
+		return nil
+	}
+	for _, a := range allowed {
+		if strings.EqualFold(value, a) {
+			return nil
+		}
+	}
+	return errors.WrapValidationError(fmt.Sprintf(
+		"invalid %s %q — must be one of: %s",
+		context, value, strings.Join(allowed, ", "),
+	))
 }
 
 // validateGenerateBindingsArgs validates all flags for the generate-bindings

@@ -177,7 +177,7 @@ the archive are available immediately without re-fetching from the network.`,
 		if upgraded, upgradeErr := session.UpgradeSessionData(data); upgradeErr != nil {
 			return upgradeErr
 		} else if upgraded {
-			fmt.Fprintf(os.Stderr, "Session schema upgraded to version %d.\n", session.SchemaVersion)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Session schema upgraded to version %d.\n", session.SchemaVersion)
 		}
 
 		report := session.ValidateIntegrity(data)
