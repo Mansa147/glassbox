@@ -369,13 +369,20 @@ func atomicWrite(path string, entries []QueueEntry) error {
 
 // redactAttrs returns a copy of attrs with all values passed through
 // SanitizeValue so no raw paths, hashes, or long strings are stored.
+// Values that are already the policy redaction placeholder are preserved as-is.
 func redactAttrs(attrs map[string]string) map[string]string {
 	if len(attrs) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(attrs))
 	for k, v := range attrs {
-		out[k] = SanitizeValue(k, v)
+		// Preserve values already redacted by the policy layer so that
+		// [redacted] placeholders are not re-processed by SanitizeValue.
+		if v == "[redacted]" {
+			out[k] = v
+		} else {
+			out[k] = SanitizeValue(k, v)
+		}
 	}
 	return out
 }
