@@ -725,3 +725,177 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+// ── Issue #805: KMS audit metadata and structured error codes ────────────────
+
+func TestKMSSigner_AuditMetadata_Fields(t *testing.T) {
+	fake := &fakeKMSClient{signature: []byte{0xAA}}
+	s := &KMSSigner{
+		client:    fake,
+		keyID:     "alias/glassbox-audit",
+		keyIDHex:  hexEncode("alias/glassbox-audit"),
+		region:    "eu-west-1",
+		retryCfg:  DefaultKMSRetryConfig(),
+		idemCache: newIdempotencyCache(8, 0),
+		now:       time.Now,
+		logFn:     (&silencedLog{}).fn(),
+		randSrc:   func() float64 { return 0 },
+	}
+
+	meta := s.AuditMetadata("corr-abc")
+	if meta.Region != "eu-west-1" {
+		t.Errorf("expected region eu-west-1, got %q", meta.Region)
+	}
+	if meta.Algorithm != "ECDSA_SHA_512" {
+		t.Errorf("expected algorithm ECDSA_SHA_512, got %q", meta.Algorithm)
+	}
+	if meta.CorrelationID != "corr-abc" {
+		t.Errorf("expected correlation_id corr-abc, got %q", meta.CorrelationID)
+	}
+	if meta.KeyIDHex == "" {
+		t.Error("KeyIDHex must not be empty")
+	}
+	// KeyRef must be a short suffix, never the full key id.
+	if meta.KeyRef == "alias/glassbox-audit" {
+		t.Error("KeyRef must be a truncated suffix, not the full key id")
+	}
+	if meta.KeyRef == "(none)" {
+		t.Error("KeyRef must not be (none) for a non-empty key id")
+	}
+}
+
+func TestKMSSigner_AuditMetadata_EmptyCorrelation(t *testing.T) {
+	s := &KMSSigner{
+		keyID:     "alias/test",
+		keyIDHex:  hexEncode("alias/test"),
+		region:    "us-east-1",
+		retryCfg:  DefaultKMSRetryConfig(),
+		idemCache: newIdempotencyCache(4, 0),
+		now:       time.Now,
+		logFn:     (&silencedLog{}).fn(),
+		randSrc:   func() float64 { return 0 },
+	}
+	meta := s.AuditMetadata("")
+	if meta.CorrelationID != "" {
+		t.Errorf("empty correlation id should remain empty, got %q", meta.CorrelationID)
+	}
+}
+
+func TestKMSSigner_UnauthorizedCode_ReturnsPermanentError(t *testing.T) {
+	for _, code := range []string{
+		"AccessDeniedException",
+		"DisabledException",
+		"InvalidKeyIdException",
+		"NotFoundException",
+	} {
+		t.Run(code, func(t *testing.T) {
+			fake := &fakeKMSClient{
+				failFirst:    99,
+				failWithCode: code,
+				signature:    []byte{0xAA},
+			}
+			signer := newTestSigner(fake, KMSRetryConfig{
+				MaxRetries:            3,
+				InitialBackoff:        time.Microsecond,
+				MaxBackoff:            time.Microsecond,
+				IdempotencyTTL:        0,
+				IdempotencyMaxEntries: 0,
+			}, (&silencedLog{}).fn())
+
+			_, err := signer.SignWithMetadata(context.Background(), []byte("payload"), "corr-authz")
+			if err == nil {
+				t.Fatal("expected error for unauthorized code")
+			}
+			// Must use WrapKMSUnauthorized → ErstKMSUnauthorized sentinel.
+			if !isErstCode(err, "KMS_UNAUTHORIZED") {
+				t.Errorf("expected KMS_UNAUTHORIZED stable code, got: %v", err)
+			}
+			// Should stop after 1 attempt — not retry.
+			if fake.signatureCalls != 1 {
+				t.Errorf("unauthorized must stop after 1 attempt, got %d calls", fake.signatureCalls)
+			}
+		})
+	}
+}
+
+func TestKMSSigner_ThrottlingExhausted_ReturnsKMSThrottled(t *testing.T) {
+	fake := &fakeKMSClient{
+		failFirst:    99,
+		failWithCode: "ThrottlingException",
+		signature:    []byte{0xAA},
+	}
+	signer := newTestSigner(fake, KMSRetryConfig{
+		MaxRetries:            2,
+		InitialBackoff:        time.Microsecond,
+		MaxBackoff:            time.Microsecond,
+		IdempotencyTTL:        0,
+		IdempotencyMaxEntries: 0,
+	}, (&silencedLog{}).fn())
+
+	_, err := signer.SignWithMetadata(context.Background(), []byte("p"), "corr-throttle")
+	if err == nil {
+		t.Fatal("expected error after retry exhaustion")
+	}
+	if !isErstCode(err, "KMS_THROTTLED") {
+		t.Errorf("expected KMS_THROTTLED stable code, got: %v", err)
+	}
+}
+
+func TestKMSSigner_TransientExhausted_ReturnsKMSTransientFailure(t *testing.T) {
+	fake := &fakeKMSClient{
+		failFirst:    99,
+		failWithCode: "InternalError",
+		signature:    []byte{0xAA},
+	}
+	signer := newTestSigner(fake, KMSRetryConfig{
+		MaxRetries:            2,
+		InitialBackoff:        time.Microsecond,
+		MaxBackoff:            time.Microsecond,
+		IdempotencyTTL:        0,
+		IdempotencyMaxEntries: 0,
+	}, (&silencedLog{}).fn())
+
+	_, err := signer.SignWithMetadata(context.Background(), []byte("p"), "corr-transient")
+	if err == nil {
+		t.Fatal("expected error after retry exhaustion")
+	}
+	if !isErstCode(err, "KMS_TRANSIENT_FAILURE") {
+		t.Errorf("expected KMS_TRANSIENT_FAILURE stable code, got: %v", err)
+	}
+}
+
+// isErstCode is a test helper that checks whether err carries a specific
+// ErstErrorCode string.
+func isErstCode(err error, want string) bool {
+	if err == nil {
+		return false
+	}
+	type coder interface{ Error() string }
+	// Check via ErstError interface.
+	type erstErr interface {
+		Error() string
+		Unwrap() error
+	}
+	// Walk the chain.
+	unwrapped := err
+	for unwrapped != nil {
+		type withCode interface {
+			Error() string
+		}
+		if e, ok := unwrapped.(interface{ Error() string }); ok {
+			if len(e.Error()) >= len(want) {
+				s := e.Error()
+				if len(s) >= len(want) && s[:len(want)] == want {
+					return true
+				}
+			}
+		}
+		type unwrapper interface{ Unwrap() error }
+		if u, ok := unwrapped.(unwrapper); ok {
+			unwrapped = u.Unwrap()
+		} else {
+			break
+		}
+	}
+	return false
+}

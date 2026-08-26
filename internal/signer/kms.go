@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	kmsTypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
+	glassboxerrors "github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/logger"
 )
 
@@ -37,6 +38,47 @@ type KMSClient interface {
 
 // Compile-time assertion that *kms.Client implements KMSClient.
 var _ KMSClient = (*kms.Client)(nil)
+
+// KMSAuditMetadata carries non-sensitive, auditable information about the
+// KMS signing key and request context. It is intended to be embedded in
+// signed audit envelopes (via SignedAuditLog.KeyOrigin) so operators can
+// trace which key and region produced a given signature without accessing
+// secret material.
+//
+// All fields are safe to log and store on disk. No private key material,
+// PINs, or AWS credentials appear here.
+type KMSAuditMetadata struct {
+	// KeyRef is a safe, short identifier for the key — the last 8 characters
+	// of the key ARN or alias.  The full ARN is NOT stored here; callers
+	// that need to record the full ARN should pass it via CorrelationID or
+	// write it to a separate, access-controlled audit store.
+	KeyRef string `json:"key_ref"`
+	// KeyIDHex is the hex-encoding of the configured key id (alias or ARN).
+	// It binds audit logs to a specific configured key identity without
+	// leaking the raw string in contexts where it would be visible.
+	KeyIDHex string `json:"key_id_hex"`
+	// Region is the AWS region in which the KMS key resides.
+	Region string `json:"region"`
+	// Algorithm is the KMS signing algorithm (e.g. "ECDSA_SHA_512").
+	Algorithm string `json:"algorithm"`
+	// CorrelationID is the caller-supplied tracing id passed to
+	// SignWithMetadata.  Empty when the caller did not supply one.
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+// AuditMetadata returns non-sensitive metadata about this KMS signer
+// suitable for inclusion in signed audit envelopes and log records.
+// The region is populated from the AWS config that was used to create
+// the underlying KMS client.
+func (s *KMSSigner) AuditMetadata(correlationID string) KMSAuditMetadata {
+	return KMSAuditMetadata{
+		KeyRef:        safeKeyIDRef(s.keyID),
+		KeyIDHex:      s.keyIDHex,
+		Region:        s.region,
+		Algorithm:     s.Algorithm(),
+		CorrelationID: correlationID,
+	}
+}
 
 // KMSProvider implements SignerProvider for AWS KMS-backed signing.
 // Keys are stored in AWS KMS and never exported, providing hardware-level
@@ -96,6 +138,7 @@ func (p *KMSProvider) Create(cfg ProviderConfig) (Signer, error) {
 		client:    kmsClient,
 		keyID:     keyID,
 		keyIDHex:  hex.EncodeToString([]byte(keyID)),
+		region:    region,
 		retryCfg:  retryCfg,
 		idemCache: newIdempotencyCache(retryCfg.IdempotencyMaxEntries, retryCfg.IdempotencyTTL),
 		now:       time.Now,
@@ -127,6 +170,7 @@ type KMSSigner struct {
 	client    KMSClient
 	keyID     string
 	keyIDHex  string
+	region    string // AWS region, stored for AuditMetadata
 	retryCfg  KMSRetryConfig
 	idemCache *idempotencyCache
 	now       func() time.Time
@@ -248,6 +292,12 @@ func (s *KMSSigner) SignWithMetadata(ctx context.Context, message []byte, correl
 
 		if !retryable {
 			meta.Elapsed = s.now().Sub(start)
+			// Map permanent authorization failures to a stable structured error
+			// so callers can distinguish "permission denied" from "transient"
+			// without parsing the error string [Issue #805].
+			if isKMSUnauthorizedCode(code) {
+				return meta, glassboxerrors.WrapKMSUnauthorized(code, safeKeyIDRef(s.keyID))
+			}
 			return meta, err
 		}
 		if attempt < s.retryCfg.MaxRetries {
@@ -256,9 +306,15 @@ func (s *KMSSigner) SignWithMetadata(ctx context.Context, message []byte, correl
 	}
 
 	meta.Elapsed = s.now().Sub(start)
-	wrapped := fmt.Errorf("kms sign failed after %d attempts (last code: %s): %w",
-		meta.Attempts, meta.ErrorCode, lastErr)
-	return meta, wrapped
+	// Classify the exhaustion cause: throttling vs generic transient failure
+	// so callers surface the right stable error code [Issue #805].
+	var wrappedErr error
+	if isKMSThrottlingCode(meta.ErrorCode) {
+		wrappedErr = glassboxerrors.WrapKMSThrottled(meta.Attempts, correlationID)
+	} else {
+		wrappedErr = glassboxerrors.WrapKMSTransientFailure(meta.Attempts, meta.ErrorCode, correlationID)
+	}
+	return meta, wrappedErr
 }
 
 // callSignOnce invokes KMS once with the precomputed digest. Centralised
@@ -547,4 +603,42 @@ func ValidateKeyID(keyID string) error {
 	}
 
 	return errors.New("KMS key ID must be an alias (alias/name), ARN, or key ID")
+}
+
+// kmsUnauthorizedCodes lists AWS KMS error codes that indicate a permanent
+// authorization or key-state failure — retrying will not help [Issue #805].
+var kmsUnauthorizedCodes = map[string]struct{}{
+	"AccessDeniedException":           {},
+	"InvalidGrantException":           {},
+	"InvalidGrantTokenException":      {},
+	"InvalidKeyUsageException":        {},
+	"DisabledException":               {},
+	"NotFoundException":               {},
+	"InvalidKeyIdException":           {},
+	"IncorrectKeyMaterialException":   {},
+	"KMSInvalidStateException":        {},
+	"IncorrectKeyException":           {},
+	"DryRunOperationException":        {},
+}
+
+// isKMSUnauthorizedCode reports whether code is a permanent authorization
+// or key-state failure.
+func isKMSUnauthorizedCode(code string) bool {
+	_, ok := kmsUnauthorizedCodes[code]
+	return ok
+}
+
+// kmsThrottlingCodes lists AWS KMS error codes that indicate throttling.
+var kmsThrottlingCodes = map[string]struct{}{
+	"ThrottlingException":                    {},
+	"TooManyRequests":                        {},
+	"TooManyRequestsException":               {},
+	"RequestLimitExceeded":                   {},
+	"ProvisionedThroughputExceededException": {},
+}
+
+// isKMSThrottlingCode reports whether code represents a throttling failure.
+func isKMSThrottlingCode(code string) bool {
+	_, ok := kmsThrottlingCodes[code]
+	return ok
 }

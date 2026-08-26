@@ -49,6 +49,29 @@ const (
 	// findings emitted before truncation remain valid; findings that would
 	// have required visiting the unvisited portion are absent.
 	ErstAnalysisTruncated ErstErrorCode = "ANALYSIS_TRUNCATED"
+
+	// KMS signing [Issue #805]
+	// ErstKMSThrottled is returned when AWS KMS responds with a throttling
+	// error (ThrottlingException, TooManyRequestsException, etc.) and the
+	// retry budget is exhausted without a successful result.
+	ErstKMSThrottled ErstErrorCode = "KMS_THROTTLED"
+	// ErstKMSUnauthorized is returned when KMS rejects a Sign or GetPublicKey
+	// call due to insufficient permissions (AccessDeniedException,
+	// InvalidGrantException, or a disabled/pending-deletion key state).
+	// This is a permanent error; retrying will not help.
+	ErstKMSUnauthorized ErstErrorCode = "KMS_UNAUTHORIZED"
+	// ErstKMSTransientFailure is returned when a KMS call fails with a
+	// transient infrastructure error (InternalError, ServiceUnavailable, etc.)
+	// and the configured retry budget is exhausted.
+	ErstKMSTransientFailure ErstErrorCode = "KMS_TRANSIENT_FAILURE"
+
+	// Audit directory policy [Issue #806]
+	// ErstAuditDirPolicyViolation is returned when audit:verify-dir detects
+	// a directory-level policy violation — missing files, duplicate signer
+	// identities, inconsistent retention metadata, unexpected schema versions,
+	// or a broken hash chain — that would not be caught by per-file signature
+	// verification alone.
+	ErstAuditDirPolicyViolation ErstErrorCode = "AUDIT_DIR_POLICY_VIOLATION"
 )
 
 // ErstError wraps an error with a standardized code and preserves the original error string.
@@ -126,6 +149,12 @@ var errorCodeRegistry = map[error]ErstErrorCode{
 	ErrSessionConflict:       ErstSessionConflict,
 	ErrSessionLockHeld:       ErstSessionLockHeld,
 	ErrAnalysisTruncated:     ErstAnalysisTruncated,
+	// KMS signing [Issue #805]
+	ErrKMSThrottled:         ErstKMSThrottled,
+	ErrKMSUnauthorized:      ErstKMSUnauthorized,
+	ErrKMSTransientFailure:  ErstKMSTransientFailure,
+	// Audit directory policy [Issue #806]
+	ErrAuditDirPolicyViolation: ErstAuditDirPolicyViolation,
 }
 
 // ClassifyError maps an error to an ErstError with a code and preserves the original error string.

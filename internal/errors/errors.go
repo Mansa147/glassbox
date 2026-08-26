@@ -100,6 +100,21 @@ var (
 	// input bytes) being exhausted [Issue #838].  Partial findings already
 	// emitted are valid; deeper subtree findings are absent.
 	ErrAnalysisTruncated = stdliberrors.New("analysis truncated: resource budget exhausted")
+
+	// ErrKMSThrottled is returned when AWS KMS responds with a throttling
+	// error and the retry budget is exhausted [Issue #805].
+	ErrKMSThrottled = stdliberrors.New("KMS throttled: retry budget exhausted")
+	// ErrKMSUnauthorized is returned when KMS rejects a call due to
+	// insufficient permissions or key state [Issue #805].
+	ErrKMSUnauthorized = stdliberrors.New("KMS authorization failed")
+	// ErrKMSTransientFailure is returned when a KMS call fails with a
+	// transient infrastructure error and the retry budget is exhausted [Issue #805].
+	ErrKMSTransientFailure = stdliberrors.New("KMS transient failure: retry budget exhausted")
+
+	// ErrAuditDirPolicyViolation is returned when audit:verify-dir finds a
+	// directory-level policy violation that per-file checks alone would miss
+	// [Issue #806].
+	ErrAuditDirPolicyViolation = stdliberrors.New("audit directory policy violation")
 )
 
 type LedgerNotFoundError struct {
@@ -593,6 +608,12 @@ var codeToSentinel = map[ErstErrorCode]error{
 	ErstSessionLockHeld: ErrSessionLockHeld,
 	// Analyzer resource budgets [Issue #838]
 	ErstAnalysisTruncated: ErrAnalysisTruncated,
+	// KMS signing [Issue #805]
+	ErstKMSThrottled:        ErrKMSThrottled,
+	ErstKMSUnauthorized:     ErrKMSUnauthorized,
+	ErstKMSTransientFailure: ErrKMSTransientFailure,
+	// Audit directory policy [Issue #806]
+	ErstAuditDirPolicyViolation: ErrAuditDirPolicyViolation,
 }
 
 // newErstError is the internal constructor.
@@ -629,4 +650,81 @@ func IsErstCode(err error, code ErstErrorCode) bool {
 		return e.Code == code
 	}
 	return false
+}
+
+// ── KMS signing errors [Issue #805] ─────────────────────────────────────────
+
+// WrapKMSThrottled returns a structured error when AWS KMS responds with
+// a throttling error and the retry budget is exhausted.
+// attempts is the number of KMS API calls that were made before giving up.
+// correlationID is the caller-supplied tracing id (may be empty).
+func WrapKMSThrottled(attempts int, correlationID string) error {
+	msg := fmt.Sprintf(
+		"KMS throttled after %d attempt(s)", attempts,
+	)
+	if correlationID != "" {
+		msg += fmt.Sprintf(" (correlation_id=%s)", correlationID)
+	}
+	return &ErstError{
+		Code:    ErstKMSThrottled,
+		Message: msg,
+		Hint: "AWS KMS is throttling requests. " +
+			"Increase GLASSBOX_KMS_MAX_RETRIES / GLASSBOX_KMS_MAX_BACKOFF_MS to absorb burst traffic, " +
+			"or reduce the signing rate. Use --audit-log-kms-key-id to confirm the correct key.",
+	}
+}
+
+// WrapKMSUnauthorized returns a structured error when AWS KMS rejects a
+// Sign or GetPublicKey call because of insufficient IAM permissions, an
+// invalid key ID, a disabled key, or a key pending deletion.
+// code is the raw AWS error code (e.g. "AccessDeniedException").
+// keyRef is a non-secret identifier for the key (alias, truncated ARN, etc.).
+func WrapKMSUnauthorized(code, keyRef string) error {
+	msg := fmt.Sprintf(
+		"KMS authorization failed (code=%s, key=%s)", code, keyRef,
+	)
+	return &ErstError{
+		Code:    ErstKMSUnauthorized,
+		Message: msg,
+		Hint: "Verify the IAM policy attached to this identity includes kms:Sign and kms:GetPublicKey " +
+			"for the target key, and that the key is Enabled (not Disabled or PendingDeletion). " +
+			"See docs/audit-kms-signing.md for the minimum IAM policy.",
+	}
+}
+
+// WrapKMSTransientFailure returns a structured error when a KMS call fails
+// with a transient infrastructure error (InternalError, ServiceUnavailable,
+// etc.) and the retry budget is exhausted without a successful result.
+// attempts is the total number of KMS API calls.
+// lastCode is the AWS error code from the final attempt.
+func WrapKMSTransientFailure(attempts int, lastCode, correlationID string) error {
+	msg := fmt.Sprintf(
+		"KMS transient failure after %d attempt(s), last code: %s", attempts, lastCode,
+	)
+	if correlationID != "" {
+		msg += fmt.Sprintf(" (correlation_id=%s)", correlationID)
+	}
+	return &ErstError{
+		Code:    ErstKMSTransientFailure,
+		Message: msg,
+		Hint: "AWS KMS returned a transient error. " +
+			"This is usually a brief AWS service disruption. " +
+			"Retry the command or increase GLASSBOX_KMS_MAX_RETRIES. " +
+			"If the problem persists, check the AWS Service Health Dashboard for your region.",
+	}
+}
+
+// ── Audit directory policy errors [Issue #806] ───────────────────────────────
+
+// WrapAuditDirPolicyViolation returns a structured error for directory-level
+// audit policy violations detected by audit:verify-dir.
+// summary is a brief description; details lists individual violations.
+func WrapAuditDirPolicyViolation(summary string, violationCount int) error {
+	return &ErstError{
+		Code:    ErstAuditDirPolicyViolation,
+		Message: fmt.Sprintf("%s (%d violation(s))", summary, violationCount),
+		Hint: "Run 'glassbox audit:verify-dir --json --dir <path>' for machine-readable details " +
+			"with per-file and aggregate results. Use --policy-config to load a policy file, " +
+			"or --expected-signers / --expected-schema-version to tighten checks.",
+	}
 }
