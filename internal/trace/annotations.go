@@ -47,6 +47,10 @@ type CostAnnotation struct {
 // targeted review model (see reviewer_comments.go); new collaboration features
 // should use it. Both are preserved on export so traces annotated by older
 // builds keep round-tripping unchanged.
+//
+// Notes holds analyst notes (see analyst_notes.go). They are stored under a
+// separate key and do NOT participate in execution hash computation so they
+// can be added, edited, or removed without altering any cryptographic evidence.
 type TraceAnnotations struct {
 	Comments         []string          `json:"comments,omitempty"`
 	ReviewerComments []ReviewerComment `json:"reviewer_comments,omitempty"`
@@ -55,6 +59,10 @@ type TraceAnnotations struct {
 	// Bookmarks are step-anchored bookmarks that travel with the trace, see
 	// bookmark.go [Issue #562].
 	Bookmarks []Bookmark `json:"bookmarks,omitempty"`
+	// Notes are analyst notes attached to trace steps, source locations, or
+	// the whole trace (see analyst_notes.go). They do not affect execution
+	// hashes — adding or removing a note never changes the trace fingerprint.
+	Notes []AnalystNote `json:"notes,omitempty"`
 }
 
 // AnnotateExecutionCosts attaches cost annotations to contract execution states.

@@ -36,7 +36,15 @@ type Entry struct {
 	Snapshot *snapshot.Snapshot `json:"snapshot"`
 	// Checksum is the SHA-256 hex digest of the snapshot's canonical JSON.
 	// It is computed on save and verified on load.
+	// Deprecated: use ContentHash which is produced from canonical JSON and is
+	// reproducible across Go versions and platforms.
 	Checksum string `json:"checksum"`
+	// ContentHash is the SHA-256 hex digest of the canonical JSON encoding of
+	// the entry's (timestamp, snapshot) pair. Canonical JSON sorts object keys
+	// and omits extra whitespace, making the hash reproducible across
+	// platforms and Go versions. Empty on legacy entries saved before this
+	// field was introduced; back-filled automatically by VerifyIntegrityFull.
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // Registry is the top-level container persisted to disk.
@@ -103,15 +111,22 @@ func NewWithNetworkSnapshot(glassboxVersion, txHash, envelopeXdr, resultMetaXdr 
 }
 
 // Add appends a snapshot captured at the given timestamp.
-// The entry checksum is computed immediately so it is always consistent with
-// the snapshot content at the time of insertion.
+// Both the legacy Checksum (raw-JSON SHA-256) and the new ContentHash
+// (canonical-JSON SHA-256) are computed immediately so every entry is
+// verifiable offline without signing keys.
 func (r *Registry) Add(timestamp int64, snap *snapshot.Snapshot) {
 	checksum := computeSnapshotChecksum(snap)
-	r.Entries = append(r.Entries, Entry{
+	e := Entry{
 		Timestamp: timestamp,
 		Snapshot:  snap,
 		Checksum:  checksum,
-	})
+	}
+	// Compute canonical content hash; ignore error — an empty hash will be
+	// back-filled on the next VerifyIntegrityFull call.
+	if h, err := EntryContentHash(&e); err == nil {
+		e.ContentHash = h
+	}
+	r.Entries = append(r.Entries, e)
 }
 
 // SaveToFile serialises the registry to a JSON file at path.

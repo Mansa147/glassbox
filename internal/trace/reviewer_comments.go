@@ -778,5 +778,8 @@ func (a TraceAnnotations) Clone() TraceAnnotations {
 			out.SessionMetadata[k] = v
 		}
 	}
+	if a.Notes != nil {
+		out.Notes = cloneNotes(a.Notes)
+	}
 	return out
 }
