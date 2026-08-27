@@ -48,7 +48,58 @@ const (
 	ConfidenceUnknown = 0
 
 	// AutoLinkMinConfidence is the minimum score to auto-generate a source link.
-	AutoLinkMinConfidence = 60
+const AutoLinkMinConfidence = 72
+)
+
+// DetailedConfidence provides structured confidence information for source mappings.
+type DetailedConfidence struct {
+	// Level is the confidence level (exact, high, medium, low, unknown).
+	Level string `json:"level"`
+	// Reason explains why this confidence level was assigned.
+	Reason string `json:"reason"`
+	// Context provides additional context about the confidence assignment.
+	Context string `json:"context,omitempty"`
+}
+
+// ConfidenceLevelFromMatchKind converts a MatchKind to a confidence level.
+func ConfidenceLevelFromMatchKind(kind MatchKind) string {
+	switch kind {
+	case MatchExactOffset:
+		return "exact"
+	case MatchFunction:
+		return "high"
+	case MatchLineTable:
+		return "medium"
+	case MatchHeuristic:
+		return "low"
+	case MatchUnknown:
+		return "unknown"
+	default:
+		return "unknown"
+	}
+}
+
+// ReasonFromMatchKind provides a reason code for a given MatchKind.
+func ReasonFromMatchKind(kind MatchKind) string {
+	switch kind {
+	case MatchExactOffset:
+		return "dwarf_exact_offset"
+	case MatchFunction:
+		return "dwarf_function_level"
+	case MatchLineTable:
+		return "dwarf_partial_line_table"
+	case MatchHeuristic:
+		return "heuristic_inference"
+	case MatchUnknown:
+		return "no_mapping_available"
+	default:
+		return "unknown_reason"
+	}
+}
+
+const (
+	// AutoLinkMinConfidence is the minimum score to auto-generate a source link.
+	AutoLinkMinConfidence = 72
 	// CandidateMinConfidence is the minimum score to present a link as a candidate.
 	CandidateMinConfidence = 15
 )
@@ -126,6 +177,13 @@ func applyConfidence(result *FallbackResult, addr uint64, kind MatchKind, stage 
 	}
 	result.Confidence = ConfidenceForKind(kind, lineKnown, columnKnown, stage)
 	result.LinkPresentation = LinkPresentationForConfidence(result.Confidence, result.File != "")
+	
+	// Populate detailed confidence information
+	result.DetailedConfidence = &DetailedConfidence{
+		Level:   ConfidenceLevelFromMatchKind(kind),
+		Reason:  ReasonFromMatchKind(kind),
+		Context: fmt.Sprintf("stage=%s,addr=0x%x", stage, addr),
+	}
 }
 
 // UserSummary formats a concise, user-visible mapping description including confidence.

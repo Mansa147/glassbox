@@ -167,6 +167,12 @@ func renderNode(b *strings.Builder, n *TraceNode, depth, lw, iw int, isLast bool
 			loc = fmt.Sprintf("%s:%d:%d", n.SourceRef.File, n.SourceRef.Line, n.SourceRef.Column)
 		}
 		writeMetaLine(b, cont, "source", loc, textWidth)
+		
+		// Add confidence information if available
+		if n.SourceRef.Confidence != nil {
+			confidenceStr := fmt.Sprintf("%s (%s)", n.SourceRef.Confidence.Level, n.SourceRef.Confidence.Reason)
+			writeMetaLine(b, cont, "confidence", confidenceStr, textWidth)
+		}
 	}
 	if n.Cost != nil {
 		writeMetaLine(b, cont, "cost", FormatCostAnnotation(n.Cost), textWidth)

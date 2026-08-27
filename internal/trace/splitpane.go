@@ -22,10 +22,13 @@ const (
 
 // SourceRef links a trace node to a position in Rust source code.
 type SourceRef struct {
-	File     string
-	Line     int // 1-based; 0 = unknown
-	Column   int // 1-based; 0 = unknown
-	Function string
+	File       string `json:"file"`
+	Line       int    `json:"line"`   // 1-based; 0 = unknown
+	Column     int    `json:"column"` // 1-based; 0 = unknown
+	Function   string `json:"function,omitempty"`
+	// Confidence indicates the reliability of this source reference.
+	// If nil, confidence is unknown (backward compatible).
+	Confidence *Confidence `json:"confidence,omitempty"`
 }
 
 // SourceContext holds a windowed slice of source lines for the lower pane.

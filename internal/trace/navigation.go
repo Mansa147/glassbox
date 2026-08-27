@@ -31,6 +31,9 @@ type ExecutionState struct {
 	WasmInstruction  string                  `json:"wasm_instruction,omitempty"`
 	SourceFile       string                  `json:"source_file,omitempty"`
 	SourceLine       int                     `json:"source_line,omitempty"`
+	SourceColumn     int                     `json:"source_column,omitempty"`
+	ConfidenceLevel  string                  `json:"confidence_level,omitempty"`
+	ConfidenceReason string                 `json:"confidence_reason,omitempty"`
 	GitHubLink       string                  `json:"github_link,omitempty"`
 	Cost             *CostAnnotation         `json:"cost,omitempty"`
 }

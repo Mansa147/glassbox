@@ -32,6 +32,9 @@ type exportState struct {
 	Error            string
 	SourceFile       string
 	SourceLine       int
+	SourceColumn     int
+	ConfidenceLevel  string
+	ConfidenceReason string
 	GitHubLink       string
 	CostSummary      string
 	CostBreakdown    []string
@@ -196,6 +199,7 @@ const traceHTMLTemplate = `<!doctype html>
       {{ if .Contract }}<span><strong>Contract:</strong> {{ .Contract }}</span>{{ end }}
       {{ if .Function }}<span><strong>Function:</strong> {{ .Function }}</span>{{ end }}
       {{ if .SourceFile }}<span><strong>Source:</strong> {{ .SourceFile }}:{{ .SourceLine }}</span>{{ end }}
+      {{ if .ConfidenceLevel }}<span><strong>Confidence:</strong> {{ .ConfidenceLevel }} ({{ .ConfidenceReason }})</span>{{ end }}
       {{ if .GitHubLink }}<span><strong>Link:</strong> <a href="{{ .GitHubLink }}" target="_blank" rel="noopener" aria-label="View source on GitHub">View on GitHub</a></span>{{ end }}
     </div>
     <div class="field"><strong>Arguments:</strong> <code>{{ .Args }}</code></div>
@@ -318,6 +322,7 @@ These comments are preserved but their target is not present in this trace.
 {{ end }}{{ if .Contract }}- **Contract:** {{ .Contract }}
 {{ end }}{{ if .Function }}- **Function:** {{ .Function }}
 {{ end }}{{ if .SourceFile }}- **Source:** {{ .SourceFile }}:{{ .SourceLine }}
+{{ end }}{{ if .ConfidenceLevel }}- **Confidence:** {{ .ConfidenceLevel }} ({{ .ConfidenceReason }})
 {{ end }}{{ if .GitHubLink }}- **GitHub:** [View on GitHub]({{ .GitHubLink }})
 {{ end }}- **Arguments:** {{ .Args }}
 {{ if .Return }}- **Return:** {{ .Return }}
@@ -895,6 +900,9 @@ func GenerateTracePlainTextWithOptions(trace *ExecutionTrace, opts ExportOptions
 		if s.SourceFile != "" {
 			fmt.Fprintf(&buf, "  Source:    %s:%d\n", s.SourceFile, s.SourceLine)
 		}
+		if s.ConfidenceLevel != "" {
+			fmt.Fprintf(&buf, "  Confidence: %s (%s)\n", s.ConfidenceLevel, s.ConfidenceReason)
+		}
 		if s.GitHubLink != "" {
 			fmt.Fprintf(&buf, "  GitHub:    %s\n", s.GitHubLink)
 		}
@@ -1028,6 +1036,9 @@ func buildExportStates(trace *ExecutionTrace, commentsByStep map[int][]exportCom
 			Error:            s.Error,
 			SourceFile:       s.SourceFile,
 			SourceLine:       s.SourceLine,
+			SourceColumn:     s.SourceColumn,
+			ConfidenceLevel:  s.ConfidenceLevel,
+			ConfidenceReason: s.ConfidenceReason,
 			GitHubLink:       s.GitHubLink,
 			CostSummary:      FormatCostAnnotation(s.Cost),
 			CostBreakdown:    FormatCostBreakdown(s.Cost),

@@ -82,6 +82,8 @@ type FallbackResult struct {
 	// CandidateLink is set when confidence is below auto-link threshold.
 	CandidateLink string `json:"candidate_link,omitempty"`
 	// LinkProvenance is rendered beside source links so reports identify the replay revision.
+	// DetailedConfidence provides structured confidence information with reason codes.
+	DetailedConfidence *DetailedConfidence `json:"detailed_confidence,omitempty"`
 	LinkProvenance string `json:"link_provenance,omitempty"`
 }
 

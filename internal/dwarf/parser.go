@@ -57,6 +57,9 @@ type SourceLocation struct {
 	File   string
 	Line   int
 	Column int
+	// Confidence indicates the reliability of this source location.
+	// If nil, confidence is unknown (backward compatible).
+	Confidence *Confidence
 }
 
 // Frame represents a stack frame with local variable information
@@ -574,10 +577,23 @@ func (p *Parser) findLineForAddr(lr *dwarf.LineReader, addr uint64) *SourceLocat
 		// If the previous entry's address range covers addr, use that entry.
 		if hasPrev && prev.Address <= addr && addr < le.Address {
 			if prev.File != nil {
+				// Determine confidence based on DWARF data quality
+				hasLineInfo := prev.Line > 0
+				hasColumnInfo := prev.Column > 0
+				confidence := trace.ConfidenceLevelFromDWARFQuality(hasLineInfo, hasColumnInfo, false)
+
+				// If path normalization was applied and produced diagnostics, lower confidence
+				if p.normalizer != nil && len(p.normalizer.GetDiagnostics()) > 0 {
+					if confidence.Level == trace.ConfidenceExact {
+						confidence = trace.DefaultConfidence(trace.ConfidenceHigh, trace.ReasonPathNormalization)
+					}
+				}
+
 				return &SourceLocation{
-					File:   prev.File.Name,
-					Line:   prev.Line,
-					Column: prev.Column,
+					File:       prev.File.Name,
+					Line:       prev.Line,
+					Column:     prev.Column,
+					Confidence: &confidence,
 				}
 			}
 		}
