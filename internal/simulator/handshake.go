@@ -60,24 +60,34 @@ func PerformHandshake(ctx context.Context, binaryPath string, minProtocol uint32
 		return nil, fmt.Errorf("%w: marshal request: %v", ErrHandshakeFailed, err)
 	}
 
-	hCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer cancel()
+	// Create lifecycle manager for handshake
+	lifecycle := NewProcessLifecycle(ProcessConfig{
+		BinaryPath:    binaryPath,
+		Timeout:       handshakeTimeout,
+		MaxStderrSize: 64 * 1024,
+	})
+	defer lifecycle.Cleanup()
 
-	cmd := exec.CommandContext(hCtx, binaryPath)
-	prepareCommand(cmd)
-	cmd.Stdin = bytes.NewReader(reqBytes)
-
+	// Setup command with handshake request
 	outBuf := limitedBuffer{limit: 512 * 1024}
-	errBuf := limitedBuffer{limit: 64 * 1024}
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
+	
+	if err := lifecycle.Start(ctx, func(cmd *exec.Cmd) {
+		cmd.Stdin = bytes.NewReader(reqBytes)
+		cmd.Stdout = &outBuf
+	}); err != nil {
+		return nil, fmt.Errorf("%w: failed to start simulator: %v", ErrHandshakeFailed, err)
+	}
 
-	if err := cmd.Run(); err != nil {
+	// Wait for process completion
+	if err := lifecycle.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: handshake canceled: %v", ErrHandshakeFailed, ctx.Err())
+		}
 		// A non-zero exit during handshake is only treated as a hard failure
 		// when we also have no stdout to parse (the sim may exit 0 after the
 		// handshake-only invocation).
 		if outBuf.Len() == 0 {
-			stderr := errBuf.String()
+			stderr := lifecycle.GetStderr()
 			logger.Logger.Warn("Simulator handshake subprocess failed",
 				"error", err, "stderr", stderr)
 			return nil, fmt.Errorf("%w: simulator exited with error: %v", ErrHandshakeFailed, err)
