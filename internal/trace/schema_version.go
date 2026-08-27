@@ -163,11 +163,15 @@ func supportedMigrationVersions() []string {
 func migrateV1toV2(data map[string]interface{}) (map[string]interface{}, error) {
 	data["schema_version"] = TraceSchemaVersion
 
-	// Unwrap trace sub-object if present and ensure required fields exist
+	// For ExportJSON envelope format, update the schema_version field
+	// and ensure trace sub-object has required migration fields
 	if traceObj, ok := data["trace"].(map[string]interface{}); ok {
+		// Ensure snapshot_interval exists (it was optional in V1 but is now expected)
 		if _, exists := traceObj["snapshot_interval"]; !exists {
 			traceObj["snapshot_interval"] = 100
 		}
+		// V2 new fields are left absent (forward compatibility)
+		// host_calls, resource_limits, trap_cause are not added
 	}
 
 	return data, nil

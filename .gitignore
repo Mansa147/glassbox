@@ -86,6 +86,8 @@ PR_284_improve_trace_export_regression_mock_harness.md
 PR_282_improve_trace_export_versioning_metadata.md
 PR_273_improve_trace_export_build_artifact_discovery.md
 PR_794_path_normalization_pipeline.md
+PR_782_event_ordering_system.md
+PR_781_trace_schema_versioning.md
 
 # --- Kiro IDE workspace files ---
 .kiro/

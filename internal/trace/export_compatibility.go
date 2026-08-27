@@ -190,6 +190,9 @@ func LoadVersionedTrace(path string, compatOpts CompatibilityOptions) (*Executio
 					"  Consider re-exporting with the current CLI for full compatibility\n",
 				path, probe.SchemaVersion, CurrentJSONSchemaVersion,
 			)
+			// For schema version migration, we would need to reload the full envelope
+			// and apply MigrateTrace. For now, we load the trace directly since
+			// the structure is compatible between 1.0 and 2.0 schema versions.
 		}
 		return probe.Trace, nil
 	}
