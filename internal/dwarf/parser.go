@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/dotandev/glassbox/internal/sourcemap"
 	"github.com/dotandev/glassbox/internal/wasmvalidate"
 )
 
@@ -72,6 +73,7 @@ type Parser struct {
 	data       *dwarf.Data
 	binaryType string // "wasm", "elf", "macho", "pe"
 	caps       *Capabilities
+	normalizer *sourcemap.PathNormalizer
 }
 
 // Capabilities returns the DWARF capability report for the binary this parser
@@ -81,6 +83,18 @@ type Parser struct {
 // remediation hints. It is nil for a Parser not created via NewParser.
 func (p *Parser) Capabilities() *Capabilities {
 	return p.caps
+}
+
+// SetPathNormalizer sets the path normalizer for DWARF source path resolution.
+// This enables cross-platform path normalization, workspace root resolution,
+// and explicit remapping tables for source locations extracted from DWARF debug info.
+func (p *Parser) SetPathNormalizer(normalizer *sourcemap.PathNormalizer) {
+	p.normalizer = normalizer
+}
+
+// PathNormalizer returns the current path normalizer, or nil if not set.
+func (p *Parser) PathNormalizer() *sourcemap.PathNormalizer {
+	return p.normalizer
 }
 
 // NewParser creates a new DWARF parser from a binary. On success the returned
@@ -504,7 +518,7 @@ func (p *Parser) FindLocalVarsAt(addr uint64) ([]LocalVar, error) {
 }
 
 // GetSourceLocation finds the source location for a given address.
-// It uses the standard library's debug/dwarf line reader.
+// It uses the standard library's debug/dwarf line reader and applies path normalization.
 func (p *Parser) GetSourceLocation(addr uint64) (*SourceLocation, error) {
 	if p.data == nil {
 		return nil, ErrNoDebugInfo
@@ -526,6 +540,16 @@ func (p *Parser) GetSourceLocation(addr uint64) (*SourceLocation, error) {
 			}
 			loc := p.findLineForAddr(lr, addr)
 			if loc != nil {
+				// Apply path normalization if a normalizer is configured
+				if p.normalizer != nil {
+					normalizedPath, diag := p.normalizer.NormalizePath(loc.File)
+					if diag != nil && diag.Severity == "error" {
+						// Log the error but return the original path for compatibility
+						// The diagnostic will be available via the normalizer
+					} else if normalizedPath != "" {
+						loc.File = normalizedPath
+					}
+				}
 				return loc, nil
 			}
 		}

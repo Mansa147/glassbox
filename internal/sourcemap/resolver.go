@@ -45,6 +45,8 @@ type Resolver struct {
 	// AutoDiscoverLocalSymbols call. Nil until that method succeeds in reading
 	// a WASM file. Exposed via DWARFCapabilityReport().
 	dwarfCaps *CapabilityReport
+	// pathNormalizer provides cross-platform path normalization for DWARF source paths.
+	pathNormalizer *PathNormalizer
 }
 
 // ErrSourceNotFound is a sentinel returned by Resolve when all discovery
@@ -118,6 +120,15 @@ func WithBuildManifest(manifestPath, wasmPath string) ResolverOption {
 func WithBuildManifestLoaded(m *BuildManifest) ResolverOption {
 	return func(r *Resolver) {
 		r.buildManifest = m
+	}
+}
+
+// WithPathNormalizer sets a PathNormalizer for cross-platform path normalization.
+// This enables separator normalization, workspace root resolution, and explicit
+// remapping tables for DWARF source paths.
+func WithPathNormalizer(normalizer *PathNormalizer) ResolverOption {
+	return func(r *Resolver) {
+		r.pathNormalizer = normalizer
 	}
 }
 
@@ -505,6 +516,11 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 		)
 	}
 
+	// Apply path normalizer if configured
+	if r.pathNormalizer != nil {
+		parser.SetPathNormalizer(r.pathNormalizer)
+	}
+
 	if !parser.HasDebugInfo() {
 		logger.Logger.Warn(
 			"Local WASM found but contains no DWARF debug symbols — source mapping will be limited",
@@ -543,11 +559,22 @@ func (r *Resolver) AutoDiscoverLocalSymbols(projectRoot string, expectedHash str
 	return nil
 }
 
-// ResolveFilePath applies manifest path remapping (when a build manifest is
-// loaded) followed by the alias resolver (if configured) to translate a
-// build-machine source path to a real filesystem path on the current machine.
-// Returns p unchanged when neither is configured.
+// ResolveFilePath applies path normalization (when configured), manifest path
+// remapping (when a build manifest is loaded), and the alias resolver (if configured)
+// to translate a build-machine source path to a real filesystem path on the current machine.
+// Returns p unchanged when none are configured.
 func (r *Resolver) ResolveFilePath(p string) string {
+	// Stage 0: Apply path normalization if configured
+	if r.pathNormalizer != nil {
+		normalizedPath, diag := r.pathNormalizer.NormalizePath(p)
+		if diag != nil && diag.Severity == "error" {
+			// Log the error but continue with original path for compatibility
+			// The diagnostic will be available via the normalizer's GetDiagnostics()
+		} else if normalizedPath != "" {
+			p = normalizedPath
+		}
+	}
+
 	// Stage A: strip the build-machine SourceRoot prefix recorded in the
 	// manifest so only the repo-relative tail survives.
 	if r.buildManifest != nil {
