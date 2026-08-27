@@ -8,6 +8,7 @@
 .PHONY: license-scan
 .PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install
 .PHONY: changelog-check changelog-generate changelog-dry-run
+.PHONY: check-bindings-byte-stable
 
 # Build variables
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -554,3 +555,35 @@ dep-compat-report:
 
 .PHONY: dep-compat dep-compat-test dep-compat-capture dep-compat-capture-dry \
         dep-compat-capture-update dep-compat-compare dep-compat-report
+
+# ──────────────────────────────────────────────
+# Byte-stable bindings verification
+#
+# Verifies that generated TypeScript bindings are byte-stable across
+# multiple generations. This detects non-determinism in the generation
+# process (ordering, line endings, timestamps, etc.).
+#
+# Usage:
+#   make check-bindings-byte-stable
+#   make check-bindings-byte-stable BINDINGS_DIR=./src/generated
+# ──────────────────────────────────────────────
+
+BINDINGS_DIR ?= ./src/generated
+CHECK_BINDINGS_SPEC_FILE ?=
+CHECK_BINDINGS_WASM_FILE ?=
+
+check-bindings-byte-stable: build
+	@echo "Running byte-stable bindings verification..."
+	@if [ -n "$(CHECK_BINDINGS_WASM_FILE)" ]; then \
+		./bin/glassbox check-bindings "$(CHECK_BINDINGS_WASM_FILE)" \
+			--output "$(BINDINGS_DIR)" --byte-verify; \
+	elif [ -n "$(CHECK_BINDINGS_SPEC_FILE)" ]; then \
+		./bin/glassbox check-bindings \
+			--spec-file "$(CHECK_BINDINGS_SPEC_FILE)" \
+			--output "$(BINDINGS_DIR)" --byte-verify; \
+	else \
+		echo "ERROR: Set CHECK_BINDINGS_WASM_FILE or CHECK_BINDINGS_SPEC_FILE"; \
+		echo "Usage: make check-bindings-byte-stable CHECK_BINDINGS_WASM_FILE=contract.wasm"; \
+		exit 1; \
+	fi
+	@echo "✓ Byte-stable bindings verification passed"

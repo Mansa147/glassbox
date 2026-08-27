@@ -403,12 +403,36 @@ jobs:
         run: exit 1
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Byte-stable bindings verification
+  # ───────────────────────────────────────────────────────────────────────────
+  bindings-byte-stable:
+    name: Byte-stable bindings verification
+    runs-on: ubuntu-latest
+    needs: go-unit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build glassbox binary
+        run: go build -o bin/glassbox ./cmd/glassbox
+
+      - name: Run byte-stable bindings test
+        run: go test -v -run TestByteStableGeneration ./internal/bindings/...
+
+  # ───────────────────────────────────────────────────────────────────────────
   # Summary job: all gates must pass before merge is allowed
   # ───────────────────────────────────────────────────────────────────────────
   ci-gate:
     name: CI gate (all tests passed)
     runs-on: ubuntu-latest
-    needs: [ go-unit, go-integration, ts-test, go-regression ]
+    needs: [ go-unit, go-integration, ts-test, go-regression, bindings-byte-stable ]
     if: always()
 
     steps:
@@ -419,6 +443,7 @@ jobs:
             "${{ needs.go-integration.result }}"
             "${{ needs.ts-test.result }}"
             "${{ needs.go-regression.result }}"
+            "${{ needs.bindings-byte-stable.result }}"
           )
           failed=0
           for r in "${results[@]}"; do

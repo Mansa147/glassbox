@@ -353,13 +353,15 @@ func GenerateCommandSchema() *CommandSchema {
 
 // MarshalSchema serialises the CommandSchema to canonical JSON bytes.  The
 // output is stable across runs: commands are sorted by name and all map keys
-// are sorted by the standard encoding/json marshaler.
+// are sorted by the standard encoding/json marshaler. Line endings are normalized to LF.
 func MarshalSchema(schema *CommandSchema) ([]byte, error) {
 	b, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshalling command schema: %w", err)
 	}
-	return b, nil
+	// Normalize line endings for cross-platform consistency
+	normalized := strings.ReplaceAll(string(b), "\r\n", "\n")
+	return []byte(normalized), nil
 }
 
 // CommandByName returns the CommandDefinition for the given command name,

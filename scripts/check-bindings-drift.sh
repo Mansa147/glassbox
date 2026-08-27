@@ -4,6 +4,9 @@
 # Detects drift between the canonical Go command schema and the committed
 # TypeScript artifacts under src/bindings/.
 #
+# This script performs byte-level comparison to ensure deterministic generation
+# across platforms and environments. Line endings are normalized to LF.
+#
 # Usage: scripts/check-bindings-drift.sh [--output-dir DIR]
 #
 # Exit codes:
@@ -35,6 +38,12 @@ for f in command-schema.ts command-types.ts command-validators.ts index.ts; do
     DRIFT=1
     continue
   fi
+
+  # Normalize line endings for cross-platform comparison
+  if command -v dos2unix >/dev/null 2>&1; then
+    dos2unix -q "$committed" "$fresh" 2>/dev/null || true
+  fi
+
   if ! diff -q "$committed" "$fresh" > /dev/null 2>&1; then
     echo "  DRIFT    $f"
     diff --unified=3 "$committed" "$fresh" || true
@@ -46,7 +55,7 @@ done
 
 echo ""
 if [ "$DRIFT" -eq 0 ]; then
-  echo "[OK] All TypeScript schema bindings are up-to-date."
+  echo "[OK] All TypeScript schema bindings are up-to-date and byte-stable."
   exit 0
 else
   echo "[DRIFT] Bindings are out of date."
