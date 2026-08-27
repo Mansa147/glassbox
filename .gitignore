@@ -101,6 +101,8 @@ commit_309*.next
 !tsconfig*.json
 !perf_baseline.json
 !performance_budgets.json
+!test/regression/fixture_index.json
+!test/regression/fixtures/**/*.json
 !license-policy.json
 
 # --- Issue PR notes (local only) ---
