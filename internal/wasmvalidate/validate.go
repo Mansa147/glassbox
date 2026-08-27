@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // FailureClass distinguishes malformed encoding from policy-limit violations.
@@ -81,6 +82,21 @@ type Limits struct {
 	MaxSectionCount     int
 	MaxDebugSectionSize int
 	MaxFunctionCount    int
+	// MaxLocalsPerFunction is the maximum number of local variables allowed in
+	// any single function body.  Pathological modules may declare millions of
+	// locals to force allocator exhaustion before a single instruction executes.
+	// Zero means the check is disabled.
+	MaxLocalsPerFunction int
+	// MaxDataSegments is the maximum number of data segments (section ID 11)
+	// allowed in the module.  Each segment can reference an arbitrary byte
+	// range, so many segments can be used to blow up memory initialisation.
+	// Zero means the check is disabled.
+	MaxDataSegments int
+	// MaxValidationTimeMS is the maximum wall-clock time (milliseconds) spent
+	// in Validate before it returns a policy issue and stops.  This is a
+	// best-effort time-out applied at section boundaries; it does not interrupt
+	// work mid-section.  Zero means no time limit.
+	MaxValidationTimeMS int
 }
 
 // DefaultLimits returns conservative bounds sized to comfortably accommodate
@@ -89,10 +105,13 @@ type Limits struct {
 // parsing.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxModuleSize:       64 * 1024 * 1024,
-		MaxSectionCount:     128,
-		MaxDebugSectionSize: 32 * 1024 * 1024,
-		MaxFunctionCount:    1_000_000,
+		MaxModuleSize:        64 * 1024 * 1024,
+		MaxSectionCount:      128,
+		MaxDebugSectionSize:  32 * 1024 * 1024,
+		MaxFunctionCount:     1_000_000,
+		MaxLocalsPerFunction: 50_000,
+		MaxDataSegments:      1_000,
+		MaxValidationTimeMS:  0, // disabled by default; callers opt in
 	}
 }
 
@@ -101,6 +120,7 @@ const (
 	sectionImport   = 2
 	sectionFunction = 3
 	sectionCode     = 10
+	sectionData     = 11
 )
 
 type issueFunc func(field string, class FailureClass, desc, hint string)
@@ -115,6 +135,12 @@ func Validate(data []byte, limits Limits) *Report {
 	issue := func(field string, class FailureClass, desc, hint string) {
 		report.OK = false
 		report.Issues = append(report.Issues, Issue{Field: field, Class: class, Description: desc, Hint: hint})
+	}
+
+	// Optional wall-clock deadline applied at section boundaries.
+	var deadline time.Time
+	if limits.MaxValidationTimeMS > 0 {
+		deadline = time.Now().Add(time.Duration(limits.MaxValidationTimeMS) * time.Millisecond)
 	}
 
 	if limits.MaxModuleSize > 0 && len(data) > limits.MaxModuleSize {
@@ -140,6 +166,8 @@ func Validate(data []byte, limits Limits) *Report {
 
 	validateFunctionIndices(data, sections, limits, issue)
 	validateDebugSections(data, sections, limits, issue)
+	validateLocalsPerFunction(data, sections, limits, deadline, issue)
+	validateDataSegments(data, sections, limits, issue)
 
 	return report
 }
@@ -426,5 +454,119 @@ func validateDebugSections(data []byte, sections []Section, limits Limits, issue
 				fmt.Sprintf("%s is %d bytes, exceeds configured debug-section limit %d bytes", name, payloadSize, limits.MaxDebugSectionSize),
 				"strip debug info or raise the configured debug-section size limit")
 		}
+	}
+}
+
+// validateLocalsPerFunction walks the code section and counts the number of
+// local variable declarations in each function body.  It never decodes
+// instructions — it only reads the local-variable header that precedes them.
+//
+// WASM function body layout (per spec):
+//   body_size   : u32 LEB128   — total byte length of what follows
+//   local_count : u32 LEB128   — number of (count, type) pairs in the header
+//   [local_count × (n: u32 LEB128, type: byte)]
+//   … instructions …
+//   0x0b (end opcode)
+//
+// We check that the sum of all n values (total local slots) does not exceed
+// limits.MaxLocalsPerFunction.  We also check the per-body byte bounds so we
+// never read past the section boundary.
+//
+// The deadline parameter is honoured between function bodies; when it is zero
+// the check is unlimited.
+func validateLocalsPerFunction(data []byte, sections []Section, limits Limits, deadline time.Time, issue issueFunc) {
+	if limits.MaxLocalsPerFunction <= 0 {
+		return
+	}
+
+	codeSec, ok := findSection(sections, sectionCode)
+	if !ok {
+		return
+	}
+
+	payload := data[codeSec.PayloadOffset : codeSec.PayloadOffset+codeSec.Size]
+	funcCount, n, ok := readULEB32(payload, 0)
+	if !ok {
+		return // already caught by validateFunctionIndices
+	}
+	pos := n
+
+	for i := uint32(0); i < funcCount; i++ {
+		// Respect the optional time deadline between bodies.
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			issue("validation_time", ClassPolicy,
+				fmt.Sprintf("validation exceeded configured time limit; stopped after checking %d/%d function bodies for locals", i, funcCount),
+				"raise the configured validation time limit or reduce module complexity")
+			return
+		}
+
+		// Read body size.
+		bodySize, n, ok := readULEB32(payload, pos)
+		if !ok || pos+n+int(bodySize) > len(payload) {
+			return // structural issue already reported
+		}
+		bodyStart := pos + n
+		bodyEnd := bodyStart + int(bodySize)
+		pos = bodyEnd
+
+		// Read local-variable declaration count.
+		localVecCount, n2, ok := readULEB32(payload, bodyStart)
+		if !ok {
+			continue
+		}
+		localPos := bodyStart + n2
+
+		var totalLocals uint32
+		for j := uint32(0); j < localVecCount; j++ {
+			// Each entry: (count: u32 LEB128, type: byte)
+			if localPos >= bodyEnd {
+				break
+			}
+			count, n3, ok := readULEB32(payload, localPos)
+			if !ok {
+				break
+			}
+			localPos += n3
+			if localPos >= bodyEnd {
+				break
+			}
+			localPos++ // skip type byte
+			totalLocals += count
+			if limits.MaxLocalsPerFunction > 0 && int(totalLocals) > limits.MaxLocalsPerFunction {
+				issue(fmt.Sprintf("function[%d].locals", i), ClassPolicy,
+					fmt.Sprintf("function body %d declares %d or more locals, exceeds configured limit %d", i, totalLocals, limits.MaxLocalsPerFunction),
+					"reduce local variable count or raise the configured local-count limit")
+				break
+			}
+		}
+	}
+}
+
+// validateDataSegments counts the number of data segments (section ID 11) and
+// checks it against limits.MaxDataSegments.  Each segment's size is also
+// bounds-checked against the section payload to detect truncated modules.
+func validateDataSegments(data []byte, sections []Section, limits Limits, issue issueFunc) {
+	if limits.MaxDataSegments <= 0 {
+		return
+	}
+
+	dataSec, ok := findSection(sections, sectionData)
+	if !ok {
+		return // no data section; nothing to check
+	}
+
+	payload := data[dataSec.PayloadOffset : dataSec.PayloadOffset+dataSec.Size]
+	segCount, _, ok := readULEB32(payload, 0)
+	if !ok {
+		issue("data_section", ClassStructural,
+			"malformed data section: cannot read segment count",
+			"provide a valid compiled WASM module")
+		return
+	}
+
+	if int(segCount) > limits.MaxDataSegments {
+		issue("data_segment_count", ClassPolicy,
+			fmt.Sprintf("module declares %d data segments, exceeds configured limit %d", segCount, limits.MaxDataSegments),
+			"reduce the number of data segments or raise the configured data-segment limit")
 	}
 }
