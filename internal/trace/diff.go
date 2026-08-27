@@ -58,11 +58,17 @@ type TraceDiff struct {
 }
 
 // stepKey produces a stable alignment key for a step, preferring
-// contract ID + function + operation for stable matching.
+// sequence ID for deterministic ordering, falling back to
+// contract ID + function + operation for backward compatibility.
 func stepKey(s *ExecutionState) string {
 	if s == nil {
 		return ""
 	}
+	// Prefer sequence ID for deterministic ordering
+	if s.SequenceID > 0 {
+		return fmt.Sprintf("seq:%d", s.SequenceID)
+	}
+	// Fallback to contract ID + function + operation
 	parts := []string{s.ContractID, s.Function, s.Operation}
 	return strings.Join(parts, "|")
 }

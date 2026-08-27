@@ -277,7 +277,8 @@ type FilteredTrace struct {
 
 // ApplyFilter returns a FilteredTrace containing only the steps that match the
 // filter expression, preserving parent context for matched descendants.
-// The original trace is never modified.
+// The original trace is never modified. Sequence IDs are preserved to maintain
+// deterministic ordering across filtering operations.
 func ApplyFilter(t *ExecutionTrace, expr *FilterExpression) (*FilteredTrace, error) {
 	if t == nil {
 		return nil, fmt.Errorf("trace is nil")

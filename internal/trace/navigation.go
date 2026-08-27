@@ -36,6 +36,12 @@ type ExecutionState struct {
 	ConfidenceReason string                 `json:"confidence_reason,omitempty"`
 	GitHubLink       string                  `json:"github_link,omitempty"`
 	Cost             *CostAnnotation         `json:"cost,omitempty"`
+	// SequenceID is a monotonically increasing identifier assigned at collection time
+	// to preserve state order across serialization, filtering, and merging operations.
+	SequenceID uint64 `json:"sequence_id,omitempty"`
+	// ParentSequenceID tracks the parent state for nested call relationships.
+	// Zero indicates no parent (top-level state).
+	ParentSequenceID uint64 `json:"parent_sequence_id,omitempty"`
 }
 
 // DefaultSnapshotInterval is the number of steps between state snapshots.
@@ -70,6 +76,7 @@ type ExecutionTrace struct {
 	SnapshotInterval int                         `json:"snapshot_interval"`
 
 	cachedSubcallGraph *SubcallGraph `json:"-"`
+	sequencer           *EventSequencer `json:"-"`
 }
 
 // NewExecutionTrace creates a new execution trace.
@@ -87,6 +94,7 @@ func NewExecutionTrace(txHash string, snapshotInterval int) *ExecutionTrace {
 		Snapshots:        make([]StateSnapshot, 0),
 		CurrentStep:      0,
 		SnapshotInterval: snapshotInterval,
+		sequencer:        NewEventSequencer(),
 	}
 }
 
@@ -110,9 +118,18 @@ func (t *ExecutionTrace) ensureSnapshot(idx int) {
 // Snapshot data (HostState/Memory) is NOT computed here; it is deferred until
 // the first call to ReconstructStateAt that needs this snapshot. This keeps
 // AddState O(1) and avoids blocking the caller while parsing large traces.
+// Sequence IDs are assigned automatically to preserve deterministic ordering.
 func (t *ExecutionTrace) AddState(state ExecutionState) {
 	state.Step = len(t.States)
 	state.Timestamp = time.Now()
+	// Assign sequence ID for deterministic ordering
+	if state.SequenceID == 0 && t.sequencer != nil {
+		state.SequenceID = t.sequencer.NextSequenceID()
+	}
+	// Set parent relationship from current sequencer state
+	if state.ParentSequenceID == 0 && t.sequencer != nil {
+		state.ParentSequenceID = t.sequencer.CurrentParent()
+	}
 	t.States = append(t.States, state)
 
 	// Register a snapshot placeholder at each interval boundary.
@@ -435,15 +452,18 @@ func exportSubcallGraph(g *SubcallGraph) interface{} {
 
 // toLocalDiagnosticEvents converts simulator.DiagnosticEvent slice to the local
 // trace.DiagnosticEvent type for use with decoder functions in this package.
+// Preserves sequence IDs and parent relationships from the source events.
 func toLocalDiagnosticEvents(events []simulator.DiagnosticEvent) []DiagnosticEvent {
 	out := make([]DiagnosticEvent, len(events))
 	for i, e := range events {
 		out[i] = DiagnosticEvent{
-			EventType:       e.EventType,
-			ContractID:      e.ContractID,
-			Topics:          e.Topics,
-			Data:            e.Data,
-			WasmInstruction: e.WasmInstruction,
+			EventType:         e.EventType,
+			ContractID:        e.ContractID,
+			Topics:            e.Topics,
+			Data:              e.Data,
+			WasmInstruction:   e.WasmInstruction,
+			SequenceID:        e.SequenceID,
+			ParentSequenceID:  e.ParentSequenceID,
 		}
 	}
 	return out
