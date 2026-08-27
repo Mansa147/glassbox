@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { verify, createHash, X509Certificate } from 'crypto';
-import stringify from 'fast-json-stable-stringify';
+import { canonicalizeJSON } from './canonical-json';
 import type { HardwareAttestation } from './signing/types';
 
 export interface TrustPolicy {
@@ -106,7 +106,7 @@ export const verifyAuditLogDetailed = (
   const hashInput = hardware_attestation
     ? { trace, hardware_attestation }
     : { trace };
-  const canonicalString = stringify(hashInput);
+  const canonicalString = canonicalizeJSON(hashInput);
 
   // 2. Re-calculate the hash
   const recalculatedHash = createHash('sha256').update(canonicalString).digest('hex');
