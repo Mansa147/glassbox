@@ -35,6 +35,11 @@ type ArchiveOptions struct {
 	SecretScanMode security.ScannerMode
 	// SecretScanOverrides are paths that are allowed to contain secrets (for test fixtures)
 	SecretScanOverrides []string
+	// RedactionReport, when non-nil, is embedded in the archive manifest so
+	// recipients can see which categories were sanitised. The report must
+	// correspond to the Data passed to ExportArchiveWithOptions — it is
+	// produced by RedactSession before the redacted copy is exported.
+	RedactionReport *RedactionReport
 }
 
 // SupportedArchiveExtensions lists the file extensions accepted for session
@@ -112,19 +117,21 @@ func ExportArchiveWithOptions(data *Data, destPath string, opts ArchiveOptions) 
 		return fmt.Errorf("%s", sb.String())
 	}
 
-	// Secret scanning — detect and optionally block exports containing secrets
+	// Secret scanning — detect and optionally block exports containing secrets.
+	// Scans every text field that will be embedded in the archive, including
+	// nested JSON artifacts (trace, bundle, annotations).
 	if opts.SecretScanMode != "" {
 		scanner := security.NewSecretScanner(opts.SecretScanMode)
 		for _, override := range opts.SecretScanOverrides {
 			scanner.AddOverride(override)
 		}
 
-		// Scan session fields that might contain secrets
+		// Scan session metadata fields.
 		fieldsToScan := map[string]string{
 			"pinned_endpoint": data.PinnedEndpoint,
-			"horizon_url":      data.HorizonURL,
+			"horizon_url":     data.HorizonURL,
+			"env_fingerprint": data.EnvFingerprint,
 		}
-
 		result := scanner.ScanMap(fieldsToScan, "session")
 		if result.HasSecrets {
 			if scanner.ShouldBlockExport(result) {
@@ -133,21 +140,33 @@ func ExportArchiveWithOptions(data *Data, destPath string, opts ArchiveOptions) 
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
 		}
 
-		// Scan annotations if present
-		if data.AnnotationsJSON != "" {
-			var annotations map[string]interface{}
-			if err := json.Unmarshal([]byte(data.AnnotationsJSON), &annotations); err == nil {
-				// Convert annotations to string map for scanning
-				annotationsStr := make(map[string]string)
-				for k, v := range annotations {
-					annotationsStr[k] = fmt.Sprintf("%v", v)
+		// Scan each nested JSON artifact individually so the error message
+		// names the specific archive member that contains the secret.
+		nestedScans := []struct {
+			member  string
+			content string
+		}{
+			{"annotations", data.AnnotationsJSON},
+			{"trace",       data.TraceJSON},
+			{"bundle",      data.BundleJSON},
+			{"source_map",  data.SourceMapJSON},
+		}
+		for _, ns := range nestedScans {
+			if ns.content == "" {
+				continue
+			}
+			var nested map[string]interface{}
+			if err := json.Unmarshal([]byte(ns.content), &nested); err == nil {
+				flatStr := make(map[string]string)
+				for k, v := range nested {
+					flatStr[k] = fmt.Sprintf("%v", v)
 				}
-				result := scanner.ScanMap(annotationsStr, "annotations")
-				if result.HasSecrets {
-					if scanner.ShouldBlockExport(result) {
-						return fmt.Errorf(scanner.GetErrorMessage(result))
+				r := scanner.ScanMap(flatStr, ns.member)
+				if r.HasSecrets {
+					if scanner.ShouldBlockExport(r) {
+						return fmt.Errorf(scanner.GetErrorMessage(r))
 					}
-					fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(result))
+					fmt.Fprintf(os.Stderr, "Warning: %s\n", scanner.GetErrorMessage(r))
 				}
 			}
 		}
@@ -236,7 +255,7 @@ func ExportArchiveWithOptions(data *Data, destPath string, opts ArchiveOptions) 
 		manifestMembers[om.member] = []byte(om.content)
 	}
 
-	manifest := BuildManifest(manifestMembers, SchemaVersion, now)
+	manifest := BuildManifestWithRedaction(manifestMembers, SchemaVersion, now, opts.RedactionReport)
 	if _, err := writeJSONEntry(zw, "manifest.json", manifest); err != nil {
 		return fmt.Errorf("failed to write manifest.json: %w", err)
 	}

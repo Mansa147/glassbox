@@ -122,8 +122,9 @@ Validation:
 
 		// Export with secret scanning options
 		archiveOpts := session.ArchiveOptions{
-			SecretScanMode:     scanMode,
+			SecretScanMode:      scanMode,
 			SecretScanOverrides: secretScanOverrideFlag,
+			RedactionReport:     report,
 		}
 		if err := session.ExportArchiveWithOptions(redacted, dest, archiveOpts); err != nil {
 			return fmt.Errorf("failed to export session archive: %w", err)

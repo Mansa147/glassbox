@@ -14,10 +14,13 @@ import (
 )
 
 var (
-	sessionGCDryRunFlag  bool
-	sessionGCMaxAgeFlag  time.Duration
+	sessionGCDryRunFlag   bool
+	sessionGCMaxAgeFlag   time.Duration
 	sessionGCMaxCountFlag int
-	sessionGCRootFlag    string
+	sessionGCMaxSizeFlag  int64
+	sessionGCStatusFlag   string
+	sessionGCExcludeFlag  []string
+	sessionGCRootFlag     string
 )
 
 var sessionGCCmd = &cobra.Command{
@@ -27,13 +30,26 @@ var sessionGCCmd = &cobra.Command{
 the configured retention policy.
 
 Active sessions and bookmarked (named) sessions are never deleted, regardless
-of age or count. Use --dry-run to preview exactly what would be removed
-without deleting anything.`,
+of age, count, or size. Use --dry-run to preview exactly what would be removed
+without deleting anything.
+
+Retention criteria (all that are set apply jointly):
+  --max-age     Remove sessions older than this duration
+  --max-count   Keep at most this many sessions
+  --max-size    Keep total retained session bytes at or below this budget
+  --status      Only remove sessions with this status (saved, expired, recovered)
+  --exclude     Protect additional named sessions beyond bookmarks (repeatable)`,
 	Example: `  # Preview what garbage collection would remove
   glassbox session gc --dry-run
 
   # Remove sessions older than 7 days, keeping at most 100
   glassbox session gc --max-age 168h --max-count 100
+
+  # Enforce a 50 MiB total size budget
+  glassbox session gc --max-size 52428800
+
+  # Only consider expired sessions for removal
+  glassbox session gc --status expired --dry-run
 
   # Run cleanup against a non-default data directory
   glassbox session gc --dry-run --root /path/to/.Glassbox`,
@@ -47,6 +63,15 @@ without deleting anything.`,
 		}
 		if cmd.Flags().Changed("max-count") {
 			opts.MaxCount = sessionGCMaxCountFlag
+		}
+		if cmd.Flags().Changed("max-size") {
+			opts.MaxTotalSize = sessionGCMaxSizeFlag
+		}
+		if cmd.Flags().Changed("status") {
+			opts.RequireStatus = sessionGCStatusFlag
+		}
+		if len(sessionGCExcludeFlag) > 0 {
+			opts.ExcludeTags = sessionGCExcludeFlag
 		}
 
 		root := sessionGCRootFlag
@@ -115,6 +140,9 @@ func init() {
 	sessionGCCmd.Flags().BoolVar(&sessionGCDryRunFlag, "dry-run", false, "Preview what would be removed without deleting anything")
 	sessionGCCmd.Flags().DurationVar(&sessionGCMaxAgeFlag, "max-age", session.DefaultTTL, "Maximum session age before it becomes eligible for cleanup")
 	sessionGCCmd.Flags().IntVar(&sessionGCMaxCountFlag, "max-count", session.DefaultMaxSessions, "Maximum number of sessions to retain")
+	sessionGCCmd.Flags().Int64Var(&sessionGCMaxSizeFlag, "max-size", 0, "Maximum total retained size in bytes; oldest excess is removed (0 = unlimited)")
+	sessionGCCmd.Flags().StringVar(&sessionGCStatusFlag, "status", "", "Only remove sessions with this status: saved, expired, or recovered")
+	sessionGCCmd.Flags().StringArrayVar(&sessionGCExcludeFlag, "exclude", nil, "Protect additional named sessions from deletion (repeatable)")
 	sessionGCCmd.Flags().StringVar(&sessionGCRootFlag, "root", "", "Glassbox data directory to clean up (default: ~/.Glassbox)")
 
 	sessionCmd.AddCommand(sessionGCCmd)

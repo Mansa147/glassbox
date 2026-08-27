@@ -16,6 +16,32 @@ import (
 // algorithm or the meaning of an existing member name changes.
 const ManifestVersion = 1
 
+// RedactionManifest is embedded in the archive manifest to describe which
+// field categories were processed during export. It records counts and
+// category names — never the sensitive values themselves — so the recipient
+// can see what was removed or pseudonymized without re-exposing the data.
+type RedactionManifest struct {
+	// Profile is the redaction profile name applied (e.g. "strict").
+	Profile string `json:"profile"`
+	// Categories lists each field class that had the policy applied.
+	Categories []RedactionCategoryEntry `json:"categories"`
+	// IdentifiersPseudonymized is the total count of unique identifiers
+	// that were pseudonymized across all JSON fields.
+	IdentifiersPseudonymized int `json:"identifiers_pseudonymized,omitempty"`
+}
+
+// RedactionCategoryEntry records one field class in the redaction manifest.
+type RedactionCategoryEntry struct {
+	// Name is the logical field class (e.g. "env_metadata").
+	Name string `json:"name"`
+	// Policy is the treatment that was applied ("redact", "pseudonymize", "keep").
+	Policy string `json:"policy"`
+	// Applied is true when the policy actually changed something in this export.
+	Applied bool `json:"applied"`
+	// Count is the number of distinct values affected (where applicable).
+	Count int `json:"count,omitempty"`
+}
+
 // CanonicalManifestMembers lists every artifact a session archive manifest
 // can cover. A member absent from a given session is simply omitted from
 // Manifest.Members rather than recorded with an empty hash.
@@ -29,6 +55,11 @@ type Manifest struct {
 	SchemaVersion   int               `json:"schema_version"`
 	CreatedAt       string            `json:"created_at"`
 	Members         map[string]string `json:"members"` // canonical member name -> sha256 hex digest
+	// Redaction is set when the archive was produced with a redaction profile
+	// other than "full". It records the categories that were removed or
+	// pseudonymized without retaining any sensitive values. This field is
+	// nil for archives exported with the default "full" (unredacted) profile.
+	Redaction *RedactionManifest `json:"redaction,omitempty"`
 }
 
 // hashBytes returns the lowercase hex-encoded SHA-256 digest of b.
@@ -43,6 +74,14 @@ func hashBytes(b []byte) string {
 // (trace, bundle, source_map, annotations) don't carry misleading zero
 // hashes.
 func BuildManifest(members map[string][]byte, schemaVersion int, createdAt time.Time) *Manifest {
+	return BuildManifestWithRedaction(members, schemaVersion, createdAt, nil)
+}
+
+// BuildManifestWithRedaction is like BuildManifest but also embeds a
+// RedactionManifest when report is non-nil and its profile is not "full".
+// This allows archive recipients to inspect what was sanitised before sharing
+// without the manifest retaining any of the removed values.
+func BuildManifestWithRedaction(members map[string][]byte, schemaVersion int, createdAt time.Time, report *RedactionReport) *Manifest {
 	m := &Manifest{
 		ManifestVersion: ManifestVersion,
 		SchemaVersion:   schemaVersion,
@@ -55,7 +94,35 @@ func BuildManifest(members map[string][]byte, schemaVersion int, createdAt time.
 		}
 		m.Members[name] = hashBytes(content)
 	}
+	if report != nil && report.Profile != RedactionFull {
+		m.Redaction = buildRedactionManifest(report)
+	}
 	return m
+}
+
+// buildRedactionManifest converts a RedactionReport into the compact
+// RedactionManifest that is stored in the archive. Sensitive values are
+// never copied — only counts and category names are recorded.
+func buildRedactionManifest(report *RedactionReport) *RedactionManifest {
+	if report == nil {
+		return nil
+	}
+	rm := &RedactionManifest{
+		Profile:                  string(report.Profile),
+		IdentifiersPseudonymized: report.IdentifiersPseudonymized,
+	}
+	for _, f := range report.Fields {
+		entry := RedactionCategoryEntry{
+			Name:    f.Field,
+			Policy:  string(f.Policy),
+			Applied: f.Applied,
+		}
+		if f.Field == FieldAccountIdentifiers && f.Applied {
+			entry.Count = report.IdentifiersPseudonymized
+		}
+		rm.Categories = append(rm.Categories, entry)
+	}
+	return rm
 }
 
 // ManifestIssue describes a single mismatch found while verifying a
