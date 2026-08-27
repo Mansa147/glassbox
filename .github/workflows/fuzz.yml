@@ -487,12 +487,116 @@ jobs:
         run: exit 1
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Demangle fuzzing
+  # ───────────────────────────────────────────────────────────────────────────
+  fuzz-demangle:
+    name: Fuzz demangle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine fuzz time
+        id: fuzz_time
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "time=${FUZZ_TIME_PR}s" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "time=${FUZZ_TIME_SCHEDULE}s" >> $GITHUB_OUTPUT
+          else
+            echo "time=${FUZZ_TIME_PUSH}s" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run demangle fuzz tests
+        id: run_fuzz
+        run: |
+          mkdir -p ci-artifacts/fuzz-demangle
+          go test -fuzz=FuzzSafeDemangleSymbol \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzSafeDemangleLegacy \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzSafeDemangleV0 \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzSafeParseLengthPrefixed \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzSafeParseV0Path \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzCreateFallbackLabel \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzSanitizeForDisplay \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzEscapeForHTML \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+          
+          go test -fuzz=FuzzEscapeForJSON \
+            -fuzztime=${{ steps.fuzz_time.outputs.time }} \
+            -timeout=${FUZZ_JOB_TIMEOUT}s \
+            ./internal/demangle/ 2>&1 | tee -a ci-artifacts/fuzz-demangle/output.log || true
+        continue-on-error: true
+
+      - name: Check for crashes
+        id: check_crashes
+        run: |
+          if grep -q "crash" ci-artifacts/fuzz-demangle/output.log; then
+            echo "crash_found=true" >> $GITHUB_OUTPUT
+            echo "Crash detected in demangle fuzzing"
+            exit 1
+          else
+            echo "crash_found=false" >> $GITHUB_OUTPUT
+            echo "No crashes detected"
+          fi
+        continue-on-error: true
+
+      - name: Upload fuzz artifacts
+        if: steps.check_crashes.outputs.crash_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-demangle-crash-${{ github.run_id }}
+          path: ci-artifacts/fuzz-demangle/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Fail if crash found
+        if: steps.check_crashes.outputs.crash_found == 'true'
+        run: exit 1
+
+  # ───────────────────────────────────────────────────────────────────────────
   # Summary job: all fuzz targets must pass
   # ───────────────────────────────────────────────────────────────────────────
   fuzz-gate:
     name: Fuzz gate (all targets passed)
     runs-on: ubuntu-latest
-    needs: [ fuzz-xdr, fuzz-decoder, fuzz-trace, fuzz-session, fuzz-wasm, fuzz-certificate ]
+    needs: [ fuzz-xdr, fuzz-decoder, fuzz-trace, fuzz-session, fuzz-wasm, fuzz-certificate, fuzz-demangle ]
     if: always()
 
     steps:
@@ -505,6 +609,7 @@ jobs:
             "${{ needs.fuzz-session.result }}"
             "${{ needs.fuzz-wasm.result }}"
             "${{ needs.fuzz-certificate.result }}"
+            "${{ needs.fuzz-demangle.result }}"
           )
           failed=0
           for r in "${results[@]}"; do
