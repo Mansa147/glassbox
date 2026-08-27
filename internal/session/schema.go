@@ -14,6 +14,10 @@ import (
 // loaded without manual regeneration. Rows older than this must be re-debugged.
 const MinSupportedSchemaVersion = 1
 
+// NOTE: SchemaVersion is defined in store.go (currently 2). When a new migration
+// step is appended to migrationTable below, increment that constant to match the
+// highest toVersion in the table.
+
 // SchemaUpgradeResult describes the outcome of a schema check or migration
 // attempt so callers can decide whether to abort, warn, or proceed silently.
 type SchemaUpgradeResult struct {
@@ -161,6 +165,27 @@ var migrationTable = []migrationStep{
 			// the integrity validator never sees an empty Status field.
 			if data.Status == "" {
 				data.Status = "active"
+			}
+		},
+	},
+	{
+		toVersion:   3,
+		description: "backfill audit-chain sentinel and revision baseline",
+		migrate: func(data *Data) {
+			// v2 → v3: sessions created before the audit-chain fields existed
+			// (AuditHash, AuditSignature, PreviousSessionHash) have them as empty
+			// strings, which is correct — no backfill needed for the hash fields.
+			//
+			// Revision was added in the same release cycle. A zero revision on an
+			// existing row means "no concurrent-write protection ever applied"; we
+			// leave it at zero so the first Save after migration establishes the
+			// baseline cleanly rather than generating a false conflict.
+			//
+			// ErstVersion: rows written before version stamping existed have an
+			// empty ErstVersion — backfill a sentinel so diagnostics can tell the
+			// difference between "version unknown" and "version not recorded".
+			if data.ErstVersion == "" {
+				data.ErstVersion = "pre-v3"
 			}
 		},
 	},

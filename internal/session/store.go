@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	// SchemaVersion tracks the database schema version for migrations
-	SchemaVersion = 2
+	// SchemaVersion tracks the database schema version for migrations.
+	// Bump this constant whenever a new step is appended to migrationTable in schema.go.
+	SchemaVersion = 3
 
 	// DefaultTTL is the default time-to-live for sessions (30 days)
 	DefaultTTL = 30 * 24 * time.Hour

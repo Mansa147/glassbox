@@ -248,7 +248,7 @@ func TestImportArchive_OlderSchemaVersion_IsMigratedBeforeValidation(t *testing.
 		t.Fatalf("writeTestArchive: %v", err)
 	}
 
-	data, err := ImportArchiveWithManifest(archivePath)
+	data, _, err := ImportArchiveWithManifest(archivePath)
 	if err != nil {
 		t.Fatalf("ImportArchiveWithManifest should succeed for an upgradable schema version, got: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestImportArchive_UnknownFields_PreservedInExtrasJSON(t *testing.T) {
 		t.Fatalf("writeTestArchive: %v", err)
 	}
 
-	data, err := ImportArchiveWithManifest(archivePath)
+	data, _, err := ImportArchiveWithManifest(archivePath)
 	if err != nil {
 		t.Fatalf("ImportArchiveWithManifest: %v", err)
 	}
