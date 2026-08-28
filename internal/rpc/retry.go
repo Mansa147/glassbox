@@ -7,9 +7,10 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dotandev/glassbox/internal/errors"
@@ -24,6 +25,8 @@ type RetryConfig struct {
 	MaxBackoff         time.Duration
 	JitterFraction     float64
 	StatusCodesToRetry []int
+	// RetryableRPCErrors contains JSON-RPC error codes that should trigger a retry
+	RetryableRPCErrors []int
 }
 
 // DefaultRetryConfig returns a sensible default retry configuration
@@ -33,7 +36,11 @@ func DefaultRetryConfig() RetryConfig {
 		InitialBackoff:     1 * time.Second,
 		MaxBackoff:         10 * time.Second,
 		JitterFraction:     0.1, // 10% jitter to prevent thundering herd
-		StatusCodesToRetry: []int{429, 503, 504},
+		StatusCodesToRetry: []int{408, 429, 500, 502, 503, 504},
+		// Common JSON-RPC error codes that may be transient
+		// -32603: Internal error (server-side)
+		// -32000 to -32099: Server error range
+		RetryableRPCErrors: []int{-32603, -32000, -32001, -32002, -32003, -32004, -32005},
 	}
 }
 
@@ -44,10 +51,70 @@ type retryLogic struct {
 	config RetryConfig
 }
 
+// isTransientError reports whether the error is a transient network error that should be retried.
+// Transient errors include: timeouts, connection resets, temporary DNS failures, and context deadlines.
+// Permanent errors include: context cancellation, malformed URLs, and certificate errors.
+func (rl retryLogic) isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context cancellation is not transient - user explicitly cancelled
+	if err == context.Canceled {
+		return false
+	}
+
+	// Context deadline exceeded is transient - timeout that might succeed on retry
+	if err == context.DeadlineExceeded {
+		return true
+	}
+
+	// Network operation timeout
+	if netErr, ok := err.(net.Error); ok {
+		if netErr.Timeout() {
+			return true
+		}
+		// Temporary network errors (e.g., connection reset, DNS failure)
+		if netErr.Temporary() {
+			return true
+		}
+	}
+
+	// Check for specific error strings that indicate transient failures
+	errMsg := strings.ToLower(err.Error())
+	transientPatterns := []string{
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"eof",
+		"temporary failure",
+		"try again",
+	}
+
+	for _, pattern := range transientPatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // shouldRetry reports whether the given HTTP status code warrants a retry.
 func (rl retryLogic) shouldRetry(statusCode int) bool {
 	for _, code := range rl.config.StatusCodesToRetry {
 		if statusCode == code {
+			return true
+		}
+	}
+	return false
+}
+
+// isRetryableRPCError checks if a JSON-RPC error code indicates a transient failure.
+// This is used when parsing RPC error payloads from response bodies.
+func (rl retryLogic) isRetryableRPCError(code int) bool {
+	for _, retryableCode := range rl.config.RetryableRPCErrors {
+		if code == retryableCode {
 			return true
 		}
 	}
@@ -110,6 +177,37 @@ func (rl retryLogic) waitWithContext(ctx context.Context, duration time.Duration
 	}
 }
 
+// redactCredentials removes sensitive information from request headers for logging.
+func (rl retryLogic) redactCredentials(req *http.Request) map[string]string {
+	headers := make(map[string]string)
+	for k, v := range req.Header {
+		// Redact sensitive headers
+		if strings.EqualFold(k, "authorization") ||
+			strings.EqualFold(k, "proxy-authorization") ||
+			strings.EqualFold(k, "cookie") ||
+			strings.EqualFold(k, "set-cookie") ||
+			strings.EqualFold(k, "x-api-key") ||
+			strings.EqualFold(k, "x-auth-token") {
+			headers[k] = "[REDACTED]"
+		} else {
+			headers[k] = strings.Join(v, ", ")
+		}
+	}
+	return headers
+}
+
+// logRequestIdentity logs request identity information without exposing credentials.
+func (rl retryLogic) logRequestIdentity(req *http.Request, attempt int, corrID string) {
+	headers := rl.redactCredentials(req)
+	logger.Logger.Debug("Request attempt",
+		"attempt", attempt,
+		"method", req.Method,
+		"url", req.URL.Redacted(),
+		"correlation_id", corrID,
+		"headers", headers,
+	)
+}
+
 // Retrier handles HTTP request retries with exponential backoff and jitter.
 type Retrier struct {
 	retryLogic
@@ -141,8 +239,18 @@ func (r *Retrier) Do(ctx context.Context, req *http.Request) (*http.Response, er
 
 		resp, err := r.client.Do(req.Clone(ctx))
 		corrID := telemetry.CorrelationIDFromContext(ctx)
+		
+		// Log request identity on each attempt for diagnostics
+		if attempt > 0 || err != nil {
+			r.logRequestIdentity(req, attempt+1, corrID)
+		}
+		
 		if err != nil {
 			lastErr = err
+			// Check if error is transient before retrying
+			if !r.isTransientError(err) {
+				return nil, err
+			}
 			if attempt < r.config.MaxRetries {
 				debugArgs := []interface{}{"attempt", attempt + 1, "error", err}
 				if corrID != "" {
@@ -228,8 +336,18 @@ func (rt *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		resp, err := rt.transport.RoundTrip(req)
 		corrID := telemetry.CorrelationIDFromContext(req.Context())
+		
+		// Log request identity on each attempt for diagnostics
+		if attempt > 0 || err != nil {
+			rt.logRequestIdentity(req, attempt+1, corrID)
+		}
+		
 		if err != nil {
 			lastErr = err
+			// Check if error is transient before retrying
+			if !rt.isTransientError(err) {
+				return nil, err
+			}
 			if attempt < rt.config.MaxRetries {
 				debugArgs := []interface{}{"attempt", attempt + 1, "error", err}
 				if corrID != "" {
