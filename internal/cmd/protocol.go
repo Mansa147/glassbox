@@ -11,6 +11,7 @@ import (
 
 	"github.com/dotandev/glassbox/internal/clioutput"
 	"github.com/dotandev/glassbox/internal/deeplink"
+	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/protocolreg"
 	"github.com/spf13/cobra"
 )
@@ -57,18 +58,19 @@ If registration fails, run 'glassbox protocol:diagnose' for a root-cause breakdo
 
 		if protocolRegisterDryRun {
 			diag := registrar.Diagnose()
-			if diag.Status == protocolreg.StatusOK {
-				fmt.Fprintf(cmd.OutOrStdout(), "[DRY-RUN] Protocol handler is already registered — no changes needed.\n")
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "[DRY-RUN] Would register %s:// handler on %s.\n", protocolreg.Scheme, diag.Platform)
-				fmt.Fprintf(cmd.OutOrStdout(), "[DRY-RUN] Current status: %s\n", diag.Status)
-				if len(diag.Issues) > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "[DRY-RUN] Issues to fix:\n")
-					for _, issue := range diag.Issues {
-						fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", issue)
-					}
-				}
+			execPath, execErr := os.Executable()
+			if execErr != nil {
+				execPath = "(unknown)"
 			}
+
+			execPlan := plan.BuildProtocolRegisterPlan(plan.ProtocolRegisterPlanOptions{
+				Platform:          diag.Platform,
+				ExecutablePath:    execPath,
+				AlreadyRegistered: diag.Status == protocolreg.StatusOK,
+				RegisteredHandler: diag.RegisteredHandler,
+			})
+
+			fmt.Fprint(cmd.OutOrStdout(), execPlan.RenderText())
 			return nil
 		}
 

@@ -717,7 +717,8 @@ Local WASM Replay Mode:
 			logger.SetLevel(slog.LevelWarn)
 		}
 
-		// Dry-run: validate inputs and environment without executing replay
+		// Dry-run: validate inputs and environment without executing replay.
+		// This now uses the shared plan model for consistency with --plan.
 		if debugDryRunFlag {
 			if demoMode || wasmPath != "" || loadSnapshotsFlag != "" || xdrFileFlag != "" || jsonFileFlag != "" {
 				progEm.Error(progress.PhaseInit, "--dry-run combined with incompatible flag", "invalid_dry_run_flags")
@@ -738,7 +739,8 @@ Local WASM Replay Mode:
 					"transaction hash is required for --dry-run\n" +
 						"Usage: glassbox debug --dry-run --network testnet <transaction-hash>")
 			}
-			return runDebugDryRun(cmd, cmdArgs[0])
+			// Build and render the execution plan for dry-run validation
+			return runDebugDryRunPlan(cmd, cmdArgs[0])
 		}
 
 		// Plan: show what the command will do without performing any side effects.
