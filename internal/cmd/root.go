@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/dotandev/glassbox/internal/config"
+	"github.com/dotandev/glassbox/internal/deterministic"
 	"github.com/dotandev/glassbox/internal/deeplink"
 	"github.com/dotandev/glassbox/internal/localization"
 	"github.com/dotandev/glassbox/internal/logger"
@@ -54,6 +55,10 @@ var (
 	// ConfigPassphraseFlag is the passphrase used to decrypt an encrypted config file.
 	// It can also be supplied via GLASSBOX_CONFIG_PASSPHRASE.
 	ConfigPassphraseFlag string
+
+	// Deterministic replay flags
+	DeterministicSeedFlag string
+	DeterministicModeFlag bool
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -122,6 +127,16 @@ Get started with 'Glassbox debug --help' or visit the documentation.`,
 		// The doctor command triggers this to verify OS dispatch works.
 		if DeepLinkFlag != "" {
 			return handleDeepLinkProbe(DeepLinkFlag)
+		}
+
+		// Configure deterministic mode if seed is provided
+		if DeterministicSeedFlag != "" || DeterministicModeFlag {
+			if DeterministicSeedFlag != "" {
+				if err := deterministic.SetGlobalSeedFromHex(DeterministicSeedFlag); err != nil {
+					return fmt.Errorf("invalid deterministic seed: %w", err)
+				}
+			}
+			deterministic.EnableDeterministicMode()
 		}
 
 		// Load localizations
@@ -246,6 +261,12 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&ConfigPassphraseFlag, "config-passphrase", "",
 		"Passphrase to decrypt an encrypted config file (or set GLASSBOX_CONFIG_PASSPHRASE)")
 	_ = rootCmd.PersistentFlags().MarkHidden("config-passphrase") // sensitive; hidden from default help
+
+	// Deterministic replay flags
+	rootCmd.PersistentFlags().StringVar(&DeterministicSeedFlag, "deterministic-seed", "",
+		"Set a 32-byte hex seed for deterministic replay (opt-in for reproducible simulation)")
+	rootCmd.PersistentFlags().BoolVar(&DeterministicModeFlag, "deterministic", false,
+		"Enable deterministic mode for reproducible simulation")
 }
 
 func checkForUpdatesAsync() {
