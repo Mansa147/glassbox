@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -443,5 +444,100 @@ func TestMarkShuttingDown_Idempotent(t *testing.T) {
 	h.MarkShuttingDown()
 	if !h.IsShuttingDown() {
 		t.Error("should be shutting down")
+	}
+}
+
+// ── Active Job Tracking (Issue #826) ─────────────────────────────────────────
+
+func TestActiveJobTracking_IncrDecr(t *testing.T) {
+	h := newTestChecker()
+	if h.ActiveJobCount() != 0 {
+		t.Errorf("expected 0 active jobs initially, got %d", h.ActiveJobCount())
+	}
+	h.IncrActiveJobs()
+	h.IncrActiveJobs()
+	if h.ActiveJobCount() != 2 {
+		t.Errorf("expected 2 active jobs, got %d", h.ActiveJobCount())
+	}
+	h.DecrActiveJobs()
+	if h.ActiveJobCount() != 1 {
+		t.Errorf("expected 1 active job, got %d", h.ActiveJobCount())
+	}
+}
+
+// ── Drain Deadline (Issue #826) ──────────────────────────────────────────────
+
+func TestDrainDeadline_NotExpiredInitially(t *testing.T) {
+	h := newTestChecker()
+	if h.DrainExpired() {
+		t.Error("should not be expired before shutdown")
+	}
+}
+
+func TestDrainDeadline_NotExpiredImmediately(t *testing.T) {
+	h := newTestChecker()
+	h.MarkShuttingDownWithDeadline(10 * time.Second)
+	if h.DrainExpired() {
+		t.Error("should not be expired immediately after shutdown with 10s deadline")
+	}
+}
+
+func TestDrainDeadline_ExpiredAfterDeadline(t *testing.T) {
+	h := newTestChecker()
+	h.MarkShuttingDownWithDeadline(0) // immediate deadline
+	time.Sleep(10 * time.Millisecond)
+	if !h.DrainExpired() {
+		t.Error("should be expired after deadline passes")
+	}
+}
+
+// ── Readiness shows active jobs during drain ─────────────────────────────────
+
+func TestReadinessHandler_ShutdownShowsActiveJobs(t *testing.T) {
+	h := newTestChecker()
+	h.MarkShuttingDown()
+	h.IncrActiveJobs()
+	h.IncrActiveJobs()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz/ready", nil)
+	rr := httptest.NewRecorder()
+	h.ReadinessHandler(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 during shutdown, got %d", rr.Code)
+	}
+	resp := decodeBody[ReadinessResponse](t, rr)
+	// The component message should mention active jobs.
+	found := false
+	for _, c := range resp.Components {
+		if c.Name == "daemon" && strings.Contains(c.Message, "2 active jobs") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected component message to mention active jobs, got: %v", resp.Components)
+	}
+}
+
+// ── Status shows active jobs and drain info ──────────────────────────────────
+
+func TestStatusHandler_ReportsActiveJobsAndDrain(t *testing.T) {
+	h := newTestChecker()
+	h.MarkShuttingDown()
+	h.IncrActiveJobs()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz/status", nil)
+	rr := httptest.NewRecorder()
+	h.StatusHandler(rr, req)
+
+	resp := decodeBody[StatusResponse](t, rr)
+	if resp.ActiveJobs != 1 {
+		t.Errorf("expected 1 active job, got %d", resp.ActiveJobs)
+	}
+	if !resp.Draining {
+		t.Error("expected Draining=true")
+	}
+	if resp.DrainDeadline == "" {
+		t.Error("expected non-empty drain_deadline")
 	}
 }

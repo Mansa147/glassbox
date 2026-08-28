@@ -6,6 +6,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,12 @@ type StatusResponse struct {
 	ProtocolVersion string           `json:"protocol_version,omitempty"`
 	Uptime          string           `json:"uptime"`
 	Components      []ComponentCheck `json:"components"`
+	// ActiveJobs is the number of in-flight requests being served.
+	ActiveJobs int32 `json:"active_jobs"`
+	// Draining indicates whether the daemon is in graceful drain mode.
+	Draining bool `json:"draining"`
+	// DrainDeadline is the RFC 3339 timestamp by which active jobs must complete.
+	DrainDeadline string `json:"drain_deadline,omitempty"`
 }
 
 // HealthChecker holds live state about the daemon and checks dependency health.
@@ -67,6 +74,14 @@ type HealthChecker struct {
 	startTime time.Time
 	// shutdown is set to 1 atomically when the server begins graceful shutdown.
 	shutdown atomic.Int32
+
+	// activeJobs tracks the number of in-flight requests.
+	activeJobs atomic.Int32
+	// drainDeadline is the time by which all active jobs must complete.
+	// Zero means no deadline is set.
+	drainDeadline time.Time
+	// drainStartTime records when drain mode was entered.
+	drainStartTime time.Time
 
 	// optional probes — nil fields are omitted from readiness checks
 	simulatorProbe func(ctx context.Context) ComponentCheck
@@ -103,11 +118,53 @@ func (h *HealthChecker) WithProtocolProbe(fn func(ctx context.Context) Component
 // Readiness will begin returning 503 while liveness continues to return 200.
 func (h *HealthChecker) MarkShuttingDown() {
 	h.shutdown.Store(1)
+	h.drainStartTime = time.Now()
+	h.drainDeadline = h.drainStartTime.Add(30 * time.Second) // default 30s deadline
+}
+
+// MarkShuttingDownWithDeadline signals graceful shutdown with a specific deadline.
+// After the deadline, readiness reports expired jobs even if they haven't completed.
+func (h *HealthChecker) MarkShuttingDownWithDeadline(deadline time.Duration) {
+	h.shutdown.Store(1)
+	h.drainStartTime = time.Now()
+	h.drainDeadline = h.drainStartTime.Add(deadline)
 }
 
 // IsShuttingDown reports whether graceful shutdown has been requested.
 func (h *HealthChecker) IsShuttingDown() bool {
 	return h.shutdown.Load() != 0
+}
+
+// ActiveJobCount returns the number of in-flight requests.
+func (h *HealthChecker) ActiveJobCount() int32 {
+	return h.activeJobs.Load()
+}
+
+// IncrActiveJobs atomically increments the active job counter.
+func (h *HealthChecker) IncrActiveJobs() {
+	h.activeJobs.Add(1)
+}
+
+// DecrActiveJobs atomically decrements the active job counter.
+func (h *HealthChecker) DecrActiveJobs() {
+	h.activeJobs.Add(-1)
+}
+
+// DrainExpired reports whether the drain deadline has been exceeded.
+func (h *HealthChecker) DrainExpired() bool {
+	if h.drainDeadline.IsZero() {
+		return false
+	}
+	return time.Now().After(h.drainDeadline)
+}
+
+// DrainDuration returns how long the daemon has been draining.
+// Returns 0 if not draining.
+func (h *HealthChecker) DrainDuration() time.Duration {
+	if h.drainStartTime.IsZero() {
+		return 0
+	}
+	return time.Since(h.drainStartTime).Round(time.Second)
 }
 
 // uptime returns a human-readable uptime string.
@@ -201,10 +258,16 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 
 	// During graceful shutdown we stop accepting new work.
 	if h.IsShuttingDown() {
+		active := h.ActiveJobCount()
+		expired := h.DrainExpired()
+		msg := fmt.Sprintf("graceful shutdown in progress (%d active jobs)", active)
+		if expired && active > 0 {
+			msg = fmt.Sprintf("drain deadline exceeded with %d jobs still active", active)
+		}
 		writeJSON(w, http.StatusServiceUnavailable, ReadinessResponse{
 			Status: HealthDown,
 			Components: []ComponentCheck{
-				{Name: "daemon", Status: HealthDown, Message: "graceful shutdown in progress"},
+				{Name: "daemon", Status: HealthDown, Message: msg},
 			},
 		})
 		return
@@ -239,10 +302,13 @@ func (h *HealthChecker) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	status := aggregateStatus(checks)
 
 	resp := StatusResponse{
-		Status:     status,
-		Version:    version.Version,
-		Uptime:     h.uptime(),
-		Components: checks,
+		Status:       status,
+		Version:      version.Version,
+		Uptime:       h.uptime(),
+		Components:   checks,
+		ActiveJobs:   h.ActiveJobCount(),
+		Draining:     h.IsShuttingDown(),
+		DrainDeadline: h.drainDeadline.Format(time.RFC3339),
 	}
 
 	writeJSON(w, http.StatusOK, resp)

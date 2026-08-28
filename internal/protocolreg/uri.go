@@ -45,6 +45,9 @@ var txHashPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 const (
 	maxSourceLen    = 256
 	maxSignatureLen = 512
+	maxURILen       = 4096
+	maxMockEntries  = 32
+	maxManifestLen  = 1024
 )
 
 // allowedNetworks is the set of valid network identifiers for the deep link.
@@ -147,6 +150,9 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("protocol URI must not be empty")
 	}
+	if len(raw) > maxURILen {
+		return nil, fmt.Errorf("protocol URI exceeds maximum length (%d characters, max %d)", len(raw), maxURILen)
+	}
 	// Reject null bytes and ASCII control characters to prevent injection attacks.
 	for i := 0; i < len(raw); i++ {
 		if raw[i] == 0x00 {
@@ -155,6 +161,10 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 		if raw[i] < 0x20 && raw[i] != '\t' {
 			return nil, fmt.Errorf("protocol URI must not contain control characters (found 0x%02x)", raw[i])
 		}
+	}
+	// Reject path traversal sequences anywhere in the URI.
+	if strings.Contains(raw, "..") {
+		return nil, fmt.Errorf("protocol URI must not contain path traversal sequences")
 	}
 	if !strings.HasPrefix(raw, Scheme+"://") {
 		return nil, fmt.Errorf("invalid protocol URI: expected %s://", Scheme)
@@ -242,17 +252,38 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 		if strings.ContainsRune(mockManifest, 0) {
 			return nil, fmt.Errorf("mock-ledger-manifest parameter contains null bytes and cannot be used")
 		}
+		if len(mockManifest) > maxManifestLen {
+			return nil, fmt.Errorf(
+				"mock-ledger-manifest parameter is too long (%d characters, max %d)",
+				len(mockManifest), maxManifestLen,
+			)
+		}
+		// Reject path traversal sequences in manifest paths.
+		if strings.Contains(mockManifest, "..") {
+			return nil, fmt.Errorf("mock-ledger-manifest parameter must not contain path traversal sequences")
+		}
 		result.MockLedgerManifest = mockManifest
 	}
 
 	// --- mock-ledger-entry (optional, repeatable) ---
 	mockEntries := q["mock-ledger-entry"]
+	if len(mockEntries) > maxMockEntries {
+		return nil, fmt.Errorf(
+			"too many mock-ledger-entry parameters (%d, max %d)",
+			len(mockEntries), maxMockEntries,
+		)
+	}
 	if len(mockEntries) > 0 {
+		seen := make(map[string]bool, len(mockEntries))
 		for _, entry := range mockEntries {
 			entry = strings.TrimSpace(entry)
 			if entry == "" {
 				continue
 			}
+			if seen[entry] {
+				return nil, fmt.Errorf("duplicate mock-ledger-entry parameter %q", entry)
+			}
+			seen[entry] = true
 			parts := strings.SplitN(entry, ":", 2)
 			if len(parts) != 2 || parts[0] == "" {
 				return nil, fmt.Errorf("invalid mock-ledger-entry format %q — expected key:value\n"+
@@ -435,6 +466,28 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 				)
 			}
 			result.SpanID = sid
+		}
+	}
+
+	// Reject unknown query parameters to prevent injection via unexpected fields.
+	knownParams := map[string]bool{
+		"network":              true,
+		"op":                   true,
+		"operation":            true,
+		"view":                 true,
+		"source":               true,
+		"signature":            true,
+		"protocol-version":     true,
+		"mock-ledger-manifest": true,
+		"mock-ledger-entry":    true,
+		"traceparent":          true,
+		"tracestate":           true,
+		"trace-id":             true,
+		"span-id":              true,
+	}
+	for param := range q {
+		if !knownParams[param] {
+			return nil, fmt.Errorf("unknown query parameter %q", param)
 		}
 	}
 

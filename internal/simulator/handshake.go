@@ -24,6 +24,10 @@ type HandshakeResult struct {
 	ProtocolVersion   uint32
 	SupportedFeatures []string
 	MaxRequestBytes   int64
+	// MinClientVersion is the oldest client version the simulator supports.
+	MinClientVersion string
+	// MaxClientVersion is the newest client version the simulator supports.
+	MaxClientVersion string
 }
 
 // ErrHandshakeFailed is the sentinel returned when the simulator rejects the
@@ -38,6 +42,10 @@ var ErrIncompatibleVersion = errors.New("simulator protocol version incompatible
 // simulator's capability set.
 var ErrMissingCapability = errors.New("simulator missing required capability")
 
+// ErrPayloadTooLarge is returned when the simulator rejects the handshake because
+// the client's MaxRequestBytes exceeds the simulator's limit.
+var ErrPayloadTooLarge = errors.New("simulator rejected payload size")
+
 // PerformHandshake spawns the simulator binary, sends a HandshakeRequest, and
 // validates the HandshakeResponse. It returns ErrIncompatibleVersion when the
 // simulator's protocol version does not match minProtocol, and
@@ -48,10 +56,12 @@ var ErrMissingCapability = errors.New("simulator missing required capability")
 // minProtocol is the minimum Stellar protocol version the Go runner requires.
 // required is the list of capability identifiers that must appear in the
 // simulator's SupportedFeatures response.
-func PerformHandshake(ctx context.Context, binaryPath string, minProtocol uint32, required []string) (*HandshakeResult, error) {
+// clientVersion is the semantic version of the Go client (e.g. "1.2.3").
+func PerformHandshake(ctx context.Context, binaryPath string, minProtocol uint32, required []string, clientVersion string) (*HandshakeResult, error) {
 	req := ipc.HandshakeRequest{
 		Type:             ipc.HandshakeRequestType,
 		ProtocolVersion:  minProtocol,
+		ClientVersion:    clientVersion,
 		RequiredFeatures: required,
 		MaxRequestBytes:  defaultMaxHandshakeRequestBytes,
 	}
@@ -135,6 +145,17 @@ func validateHandshake(resp ipc.HandshakeResponse, minProtocol uint32, required 
 		)
 	}
 
+	// Check client version range if the simulator advertised supported bounds.
+	// These checks are best-effort: older simulators omit the fields entirely.
+	if resp.MinClientVersion != "" || resp.MaxClientVersion != "" {
+		// We cannot do a full semver comparison here, but we can log the bounds
+		// for diagnostics and the caller can decide whether to proceed.
+		logger.Logger.Debug("Simulator advertised client version bounds",
+			"min", resp.MinClientVersion,
+			"max", resp.MaxClientVersion,
+		)
+	}
+
 	featureSet := make(map[string]struct{}, len(resp.SupportedFeatures))
 	for _, f := range resp.SupportedFeatures {
 		featureSet[f] = struct{}{}
@@ -154,6 +175,8 @@ func validateHandshake(resp ipc.HandshakeResponse, minProtocol uint32, required 
 		ProtocolVersion:   resp.ProtocolVersion,
 		SupportedFeatures: resp.SupportedFeatures,
 		MaxRequestBytes:   resp.MaxRequestBytes,
+		MinClientVersion:  resp.MinClientVersion,
+		MaxClientVersion:  resp.MaxClientVersion,
 	}
 	logger.Logger.Debug("Simulator handshake succeeded",
 		"build", result.SimulatorBuild,
@@ -169,12 +192,19 @@ func HandshakeDiagnostics(r *HandshakeResult) map[string]interface{} {
 	if r == nil {
 		return map[string]interface{}{"handshake": "not_performed"}
 	}
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"simulator_build":     r.SimulatorBuild,
 		"protocol_version":    r.ProtocolVersion,
 		"supported_features":  r.SupportedFeatures,
 		"max_request_bytes":   r.MaxRequestBytes,
 	}
+	if r.MinClientVersion != "" {
+		m["min_client_version"] = r.MinClientVersion
+	}
+	if r.MaxClientVersion != "" {
+		m["max_client_version"] = r.MaxClientVersion
+	}
+	return m
 }
 
 // HandshakeDiagnosticsJSON returns HandshakeDiagnostics serialised to compact

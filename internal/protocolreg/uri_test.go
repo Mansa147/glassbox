@@ -609,3 +609,98 @@ func TestParseDebugURI_MockLedgerEntries_Invalid(t *testing.T) {
 		}
 	}
 }
+
+// ─── Path traversal hardening (Issue #823) ───────────────────────────────────
+
+func TestParseDebugURI_PathTraversal_Rejected(t *testing.T) {
+	uri := baseURI + "&mock-ledger-manifest=../../etc/passwd"
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for path traversal in mock-ledger-manifest")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error should mention 'path traversal', got: %v", err)
+	}
+}
+
+func TestParseDebugURI_URIPathTraversal_Rejected(t *testing.T) {
+	raw := "glassbox://debug/../secret?network=testnet"
+	_, err := ParseDebugURI(raw)
+	if err == nil {
+		t.Fatal("expected error for path traversal in URI path")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error should mention 'path traversal', got: %v", err)
+	}
+}
+
+// ─── Oversized URI (Issue #823) ──────────────────────────────────────────────
+
+func TestParseDebugURI_OversizedURI_Rejected(t *testing.T) {
+	// Create a URI exceeding maxURILen.
+	longSource := strings.Repeat("a", maxURILen+1)
+	uri := baseURI + "&source=" + longSource
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for oversized URI")
+	}
+	if !strings.Contains(err.Error(), "maximum length") {
+		t.Errorf("error should mention 'maximum length', got: %v", err)
+	}
+}
+
+// ─── Duplicate mock-ledger-entry (Issue #823) ────────────────────────────────
+
+func TestParseDebugURI_DuplicateMockEntry_Rejected(t *testing.T) {
+	uri := baseURI + "&mock-ledger-entry=AAAAAQ==:BBBBQg==&mock-ledger-entry=AAAAAQ==:BBBBQg=="
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for duplicate mock-ledger-entry")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error should mention 'duplicate', got: %v", err)
+	}
+}
+
+// ─── Too many mock-ledger-entry (Issue #823) ─────────────────────────────────
+
+func TestParseDebugURI_TooManyMockEntries_Rejected(t *testing.T) {
+	uri := baseURI
+	for i := 0; i < maxMockEntries+1; i++ {
+		uri += "&mock-ledger-entry=AAAAAQ==:BBBBQg=="
+	}
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for too many mock-ledger-entries")
+	}
+	if !strings.Contains(err.Error(), "too many") {
+		t.Errorf("error should mention 'too many', got: %v", err)
+	}
+}
+
+// ─── Unknown query parameter (Issue #823) ────────────────────────────────────
+
+func TestParseDebugURI_UnknownParam_Rejected(t *testing.T) {
+	uri := baseURI + "&evil_param=inject"
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for unknown query parameter")
+	}
+	if !strings.Contains(err.Error(), "unknown query parameter") {
+		t.Errorf("error should mention 'unknown query parameter', got: %v", err)
+	}
+}
+
+// ─── Oversized mock-ledger-manifest (Issue #823) ─────────────────────────────
+
+func TestParseDebugURI_OversizedManifest_Rejected(t *testing.T) {
+	longPath := strings.Repeat("a/", maxManifestLen/2+1)
+	uri := baseURI + "&mock-ledger-manifest=" + longPath
+	_, err := ParseDebugURI(uri)
+	if err == nil {
+		t.Fatal("expected error for oversized mock-ledger-manifest")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("error should mention 'too long', got: %v", err)
+	}
+}
