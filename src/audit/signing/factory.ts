@@ -6,6 +6,7 @@ import { SoftwareEd25519Signer } from './softwareSigner';
 import { Pkcs11Signer } from './pkcs11Signer';
 import { KmsSigner } from './kmsSigner';
 import { loadKmsRetryConfigFromEnv, type KmsRetryConfig } from './kmsRetry';
+import { assertProviderSupported } from './capabilities';
 
 export type SigningProvider = 'software' | 'pkcs11' | 'kms';
 
@@ -16,10 +17,21 @@ export interface CreateAuditSignerOpts {
   kmsSigningAlgorithm?: string;
   /** Optional per-instance overrides for KMS retry policy. */
   kmsRetryConfig?: Partial<KmsRetryConfig>;
+  /**
+   * Skip the capability pre-check. Use only in unit tests that mock the
+   * underlying provider modules.
+   */
+  skipCapabilityCheck?: boolean;
 }
 
 export function createAuditSigner(opts: CreateAuditSignerOpts): AuditSigner {
   const provider = (opts.hsmProvider?.toLowerCase() ?? 'software') as SigningProvider;
+
+  // Guard: fail before any network or signing operation when the provider is
+  // unavailable in the current runtime (e.g. PKCS#11 in a browser bundle).
+  if (!opts.skipCapabilityCheck) {
+    assertProviderSupported(provider);
+  }
 
   switch (provider) {
     case 'kms':

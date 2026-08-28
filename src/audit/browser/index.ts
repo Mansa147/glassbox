@@ -44,3 +44,7 @@ export {
   canonicalStringify,
   buildAuditHashInput,
 } from './canonicalize';
+
+// Re-export the UnsupportedProviderError so browser consumers can catch it
+// without importing from the Node-only signing package.
+export { UnsupportedProviderError } from './unsupportedProviderError';
