@@ -31,6 +31,8 @@ resolves any ID conflict with an existing local session:
   rename  keep both sessions by assigning the import a freshly generated ID
   merge   combine mergeable metadata (bookmark name, annotations) into the
           existing session
+  replace overwrite the existing session with the incoming data (destructive;
+          preserves CreatedAt and audit chain from the existing record)
 
 Use --preview to see what would conflict without importing anything.`,
 	Example: `  # Preview conflicts before deciding a policy
@@ -43,7 +45,10 @@ Use --preview to see what would conflict without importing anything.`,
   glassbox session import ./shared-session.gbx --on-conflict rename
 
   # Merge annotations and bookmark into the existing session
-  glassbox session import ./shared-session.gbx --on-conflict merge`,
+  glassbox session import ./shared-session.gbx --on-conflict merge
+
+  # Replace the existing session entirely (destructive)
+  glassbox session import ./shared-session.gbx --on-conflict replace`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -62,23 +67,32 @@ Use --preview to see what would conflict without importing anything.`,
 		defer store.Close()
 
 		if sessionImportPreviewFlag {
-			existing, conflicts, err := session.DetectImportConflict(ctx, store, incoming)
+			policy, _ := session.ParseImportConflictPolicy(sessionImportPolicyFlag)
+			plan, err := session.PlanImport(ctx, store, incoming, policy)
 			if err != nil {
 				return err
 			}
-			if existing == nil {
+			if plan.Existing == nil {
 				fmt.Fprintf(out, "No conflict: %q is not present in the local store.\n", incoming.ID)
+				fmt.Fprintf(out, "Import would create a new session.\n")
+				fmt.Fprintf(out, "Estimated size: %d bytes\n", plan.EstimatedSizeBytes)
 				return nil
 			}
-			if len(conflicts) == 0 {
+			if len(plan.Conflicts) == 0 && plan.ArtifactConflicts == 0 {
 				fmt.Fprintf(out, "Session %q already exists locally with identical data.\n", incoming.ID)
 				return nil
 			}
-			fmt.Fprintf(out, "Session %q already exists locally (%d field(s) differ):\n", incoming.ID, len(conflicts))
-			for i, c := range conflicts {
-				fmt.Fprintf(out, "  %d. [%s] existing=%q incoming=%q\n", i+1, c.Field, c.Existing, c.Incoming)
+			fmt.Fprintf(out, "Session %q already exists locally (%d field(s) differ):\n", incoming.ID, len(plan.Conflicts))
+			for i, c := range plan.Conflicts {
+				fmt.Fprintf(out, "  %d. [%s] severity=%s existing=%q incoming=%q\n",
+					i+1, c.Field, c.Severity, c.Existing, c.Incoming)
 			}
-			fmt.Fprintln(out, "\nRe-run with --on-conflict fail|rename|merge to apply a resolution.")
+			if plan.ArtifactConflicts > 0 {
+				fmt.Fprintf(out, "  %d artifact(s) differ (trace, bundle, source_map, annotations)\n", plan.ArtifactConflicts)
+			}
+			fmt.Fprintf(out, "\nPortable: %v | Schema compatible: %v | Size: %d bytes\n",
+				plan.Portable, plan.SchemaCompatible, plan.EstimatedSizeBytes)
+			fmt.Fprintln(out, "\nRe-run with --on-conflict fail|rename|merge|replace to apply a resolution.")
 			return nil
 		}
 
@@ -104,6 +118,9 @@ Use --preview to see what would conflict without importing anything.`,
 		case result.Merged:
 			fmt.Fprintf(out, "Conflict resolved by merge: session %s updated with %d merged field(s)\n",
 				result.Saved.ID, len(result.Conflicts))
+		case result.Replaced:
+			fmt.Fprintf(out, "Conflict resolved by replace: session %s overwritten with incoming data (%s preserved)\n",
+				result.Saved.ID, result.Existing.CreatedAt.Format("2006-01-02T15:04:05"))
 		}
 
 		return nil
@@ -111,7 +128,7 @@ Use --preview to see what would conflict without importing anything.`,
 }
 
 func init() {
-	sessionImportCmd.Flags().StringVar(&sessionImportPolicyFlag, "on-conflict", "fail", "Conflict resolution policy: fail, rename, or merge")
+	sessionImportCmd.Flags().StringVar(&sessionImportPolicyFlag, "on-conflict", "fail", "Conflict resolution policy: fail, rename, merge, or replace")
 	sessionImportCmd.Flags().BoolVar(&sessionImportPreviewFlag, "preview", false, "Show conflicts without importing anything")
 
 	sessionCmd.AddCommand(sessionImportCmd)

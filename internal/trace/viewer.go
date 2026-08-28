@@ -135,7 +135,7 @@ func (v *InteractiveViewer) Start() error {
 	// keyed by content fingerprint, so a re-fetched trace whose steps have
 	// changed simply starts fresh instead of applying stale state.
 	restored := false
-	if st, ok, err := session.LoadViewerState(v.stateFP); err == nil && ok {
+	if st, ok, err := session.LoadViewerState(v.stateFP, len(v.trace.States)); err == nil && ok {
 		if st.CurrentStep >= 0 && st.CurrentStep < len(v.trace.States) {
 			_, _ = v.trace.JumpToStep(st.CurrentStep)
 		}
@@ -755,14 +755,53 @@ func (v *InteractiveViewer) saveViewerState() {
 		return
 	}
 	st := session.ViewerState{
-		TxHash:       v.trace.TransactionHash,
-		CurrentStep:  v.trace.CurrentStep,
-		SearchQuery:  v.search.Query(),
-		CurrentMatch: v.search.CurrentMatchNumber(),
-		EventFilter:  v.eventFilter,
-		HideStdLib:   v.hideStdLib,
+		TxHash:            v.trace.TransactionHash,
+		CurrentStep:       v.trace.CurrentStep,
+		SearchQuery:       v.search.Query(),
+		CurrentMatch:      v.search.CurrentMatchNumber(),
+		EventFilter:       v.eventFilter,
+		HideStdLib:        v.hideStdLib,
+		ExpandedCallFrames: v.expandedSteps(),
+		Viewport: session.ViewerViewport{
+			FirstVisible: v.trace.CurrentStep,
+			LastVisible:  min(v.trace.CurrentStep+10, len(v.trace.States)-1),
+		},
+		Annotations: v.annotationState(),
 	}
 	_ = session.SaveViewerState(v.stateFP, st)
+}
+
+// expandedSteps returns the step indices of currently expanded call frames.
+func (v *InteractiveViewer) expandedSteps() []int {
+	var steps []int
+	for i := range v.trace.States {
+		if v.trace.States[i].HostState != nil && len(v.trace.States[i].HostState) > 0 {
+			steps = append(steps, i)
+		}
+	}
+	return steps
+}
+
+// annotationState returns the current annotation panel visibility state.
+func (v *InteractiveViewer) annotationState() map[string][]string {
+	m := make(map[string][]string)
+	for i := range v.trace.States {
+		s := &v.trace.States[i]
+		var panels []string
+		if len(s.HostState) > 0 {
+			panels = append(panels, "host_state")
+		}
+		if len(s.Memory) > 0 {
+			panels = append(panels, "memory")
+		}
+		if s.Cost != nil {
+			panels = append(panels, "cost")
+		}
+		if len(panels) > 0 {
+			m[fmt.Sprintf("%d", i)] = panels
+		}
+	}
+	return m
 }
 
 // resetViewerState deletes persisted viewer state. With no argument it clears
