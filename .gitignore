@@ -106,6 +106,7 @@ commit_309*.next
 !test/regression/fixture_index.json
 !test/regression/fixtures/**/*.json
 !license-policy.json
+!observability-manifest.json
 
 # --- Issue PR notes (local only) ---
 PR_270_improve_trace_export_session_recovery_integrity.md
