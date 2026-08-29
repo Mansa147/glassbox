@@ -196,7 +196,7 @@ with open(manifest_path) as f:
 # json.Marshal of the struct, which is the Go struct field order.
 BODY_FIELDS = [
     "schema_version", "version", "commit", "build_date",
-    "sbom_ref", "artifacts", "provenance",
+    "sbom_ref", "artifacts", "provenance", "build_provenance",
 ]
 body = {}
 for k in BODY_FIELDS:

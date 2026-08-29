@@ -224,3 +224,119 @@ func TestRun_AutoDetectsSBOMRef(t *testing.T) {
 	assert.Equal(t, "glassbox-v1.0.0.spdx.json", sm.SBOMRef,
 		"SBOMRef must be auto-populated from the detected SPDX file")
 }
+
+// ─── Build provenance tests ───────────────────────────────────────────────────
+
+func TestRun_BuildProvenanceEmbedded(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-linux-amd64.tar.gz"), []byte("fake binary"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+
+	keyPath := generateTestKey(t)
+	outPath := filepath.Join(dir, "manifest.json")
+
+	commit := strings.Repeat("b", 40)
+	err := run([]string{
+		"--dist", dir,
+		"--version", "v2.0.0",
+		"--commit", commit,
+		"--build-date", "2026-06-01T00:00:00Z",
+		"--signing-key", keyPath,
+		"--output", outPath,
+		"--json-only",
+		// Build provenance flags
+		"--build-source-repository", "https://github.com/dotandev/glassbox",
+		"--build-source-ref", "refs/tags/v2.0.0",
+		"--build-go-version", "go1.26.0 linux/amd64",
+		"--build-runner-os", "ubuntu-24.04",
+		"--build-workflow", ".github/workflows/release.yml",
+		"--build-run-id", "99999999",
+	})
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+
+	var sm manifest.SignedManifest
+	require.NoError(t, json.Unmarshal(raw, &sm))
+
+	require.NotNil(t, sm.BuildProvenance, "build_provenance must be present")
+	assert.Equal(t, "https://github.com/dotandev/glassbox", sm.BuildProvenance.SourceRepository)
+	assert.Equal(t, "refs/tags/v2.0.0", sm.BuildProvenance.SourceRef)
+	assert.Equal(t, commit, sm.BuildProvenance.CommitSHA)
+	assert.Equal(t, "go1.26.0 linux/amd64", sm.BuildProvenance.GoVersion)
+	assert.Equal(t, "ubuntu-24.04", sm.BuildProvenance.BuildRunnerOS)
+	assert.Equal(t, ".github/workflows/release.yml", sm.BuildProvenance.BuildWorkflow)
+	assert.Equal(t, "99999999", sm.BuildProvenance.BuildRunID)
+
+	// Signature must still be valid when build_provenance is present.
+	result := manifest.Verify(&sm)
+	assert.True(t, result.Valid, "manifest with build_provenance must still verify")
+}
+
+func TestRun_BuildProvenanceOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-linux-amd64.tar.gz"), []byte("data"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+
+	keyPath := generateTestKey(t)
+	outPath := filepath.Join(dir, "manifest.json")
+
+	err := run([]string{
+		"--dist", dir,
+		"--version", "v1.0.0",
+		"--commit", strings.Repeat("c", 40),
+		"--build-date", "2026-01-01T00:00:00Z",
+		"--signing-key", keyPath,
+		"--output", outPath,
+		"--json-only",
+		// No --build-* flags — provenance should be absent from JSON.
+	})
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+
+	// build_provenance key must be absent when no flags are supplied.
+	assert.NotContains(t, string(raw), `"build_provenance"`,
+		"build_provenance must be omitted when no provenance flags are provided")
+}
+
+func TestRun_TamperedProvenance_SignatureInvalid(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "glassbox-linux-amd64.tar.gz"), []byte("data"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checksums.sha256"), []byte("abc"), 0644))
+
+	keyPath := generateTestKey(t)
+	outPath := filepath.Join(dir, "manifest.json")
+
+	err := run([]string{
+		"--dist", dir,
+		"--version", "v1.0.0",
+		"--commit", strings.Repeat("d", 40),
+		"--build-date", "2026-01-01T00:00:00Z",
+		"--signing-key", keyPath,
+		"--output", outPath,
+		"--json-only",
+		"--build-source-repository", "https://github.com/dotandev/glassbox",
+	})
+	require.NoError(t, err)
+
+	// Tamper with build_provenance after signing.
+	raw, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+
+	tampered := strings.ReplaceAll(
+		string(raw),
+		`"https://github.com/dotandev/glassbox"`,
+		`"https://evil.example.com/tampered"`,
+	)
+	require.NoError(t, os.WriteFile(outPath, []byte(tampered), 0644))
+
+	var sm manifest.SignedManifest
+	require.NoError(t, json.Unmarshal([]byte(tampered), &sm))
+
+	result := manifest.Verify(&sm)
+	assert.False(t, result.HashValid, "tampered build_provenance must invalidate manifest_hash")
+	assert.False(t, result.Valid, "tampered manifest must not verify")
+}

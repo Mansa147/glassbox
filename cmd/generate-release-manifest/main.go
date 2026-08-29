@@ -62,6 +62,13 @@ type flags struct {
 	output         string
 	verify         bool
 	jsonOnly       bool
+	// Build provenance fields
+	buildSourceRepository string
+	buildSourceRef        string
+	buildGoVersion        string
+	buildRunnerOS         string
+	buildWorkflow         string
+	buildRunID            string
 }
 
 func run(args []string) error {
@@ -80,6 +87,13 @@ func run(args []string) error {
 	fs.StringVar(&f.output, "output", "", "Write signed manifest to this file instead of stdout")
 	fs.BoolVar(&f.verify, "verify", false, "Verify the written manifest immediately after signing (default: true when --output is set)")
 	fs.BoolVar(&f.jsonOnly, "json-only", false, "Suppress informational messages; write only the JSON manifest")
+	// Build provenance flags — all optional, populated by CI environment.
+	fs.StringVar(&f.buildSourceRepository, "build-source-repository", "", "VCS URL of the source repository (e.g. https://github.com/org/repo)")
+	fs.StringVar(&f.buildSourceRef, "build-source-ref", "", "Fully-qualified git ref (e.g. refs/tags/v1.2.3)")
+	fs.StringVar(&f.buildGoVersion, "build-go-version", "", "Go toolchain version string (e.g. go1.26.0 linux/amd64)")
+	fs.StringVar(&f.buildRunnerOS, "build-runner-os", "", "Build runner operating system (e.g. ubuntu-24.04)")
+	fs.StringVar(&f.buildWorkflow, "build-workflow", "", "CI workflow file that produced this release")
+	fs.StringVar(&f.buildRunID, "build-run-id", "", "CI run ID (for log lookup)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -135,7 +149,7 @@ func run(args []string) error {
 		}
 	}
 
-	// Build provenance if any identity flags were set.
+	// Build signer provenance if any identity flags were set.
 	var prov *manifest.ManifestProvenance
 	if f.signerIdentity != "" || f.keyID != "" {
 		prov = &manifest.ManifestProvenance{
@@ -145,8 +159,24 @@ func run(args []string) error {
 		}
 	}
 
+	// Build source/build provenance from flags.
+	var bp *manifest.BuildProvenance
+	if f.buildSourceRepository != "" || f.buildSourceRef != "" || f.buildGoVersion != "" ||
+		f.buildRunnerOS != "" || f.buildWorkflow != "" || f.buildRunID != "" {
+		bp = &manifest.BuildProvenance{
+			SourceRepository: f.buildSourceRepository,
+			SourceRef:        f.buildSourceRef,
+			CommitSHA:        f.commit,
+			GoVersion:        f.buildGoVersion,
+			BuildRunnerOS:    f.buildRunnerOS,
+			BuildWorkflow:    f.buildWorkflow,
+			BuildRunID:       f.buildRunID,
+		}
+		logf("  Build provenance: repo=%s ref=%s run=%s", shortHex(bp.SourceRepository), bp.SourceRef, bp.BuildRunID)
+	}
+
 	logf("Building manifest ...")
-	m, err := manifest.New(f.version, f.commit, f.buildDate, f.sbomRef, f.dist, entries, prov)
+	m, err := manifest.NewWithBuildProvenance(f.version, f.commit, f.buildDate, f.sbomRef, f.dist, entries, prov, bp)
 	if err != nil {
 		return fmt.Errorf("building manifest: %w", err)
 	}

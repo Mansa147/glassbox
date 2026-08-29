@@ -92,6 +92,36 @@ type ManifestProvenance struct {
 	Algorithm string `json:"algorithm,omitempty"`
 }
 
+// BuildProvenance records the source and build inputs that produced a release.
+// It is embedded in every ReleaseManifest so consumers can trace an artifact
+// back to the exact source revision and declared build environment without
+// needing access to any CI secret.
+type BuildProvenance struct {
+	// SourceRepository is the canonical VCS URL of the source repository.
+	// E.g. "https://github.com/dotandev/glassbox"
+	SourceRepository string `json:"source_repository,omitempty"`
+	// SourceRef is the fully-qualified Git ref that was built
+	// (e.g. "refs/tags/v1.2.3" or "refs/heads/main").
+	SourceRef string `json:"source_ref,omitempty"`
+	// CommitSHA is the full 40-character hex SHA of the source commit.
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// GoVersion is the Go toolchain version used to compile the binaries,
+	// as reported by `go version` (e.g. "go1.26.0 linux/amd64").
+	GoVersion string `json:"go_version,omitempty"`
+	// BuildRunnerOS is the operating system of the build runner
+	// (e.g. "ubuntu-24.04").
+	BuildRunnerOS string `json:"build_runner_os,omitempty"`
+	// BuildWorkflow is the CI workflow file that produced this release
+	// (e.g. ".github/workflows/release.yml").
+	BuildWorkflow string `json:"build_workflow,omitempty"`
+	// BuildRunID is the CI run identifier that can be used to locate build logs.
+	// For GitHub Actions this is the numeric run ID.
+	BuildRunID string `json:"build_run_id,omitempty"`
+	// SourceDateEpoch is the Unix timestamp used as SOURCE_DATE_EPOCH to
+	// produce reproducible archives (equals the commit timestamp).
+	SourceDateEpoch int64 `json:"source_date_epoch,omitempty"`
+}
+
 // ReleaseManifest is the unsigned body of the manifest. It is serialised to
 // canonical JSON and hashed before signing.
 type ReleaseManifest struct {
@@ -111,6 +141,11 @@ type ReleaseManifest struct {
 	Artifacts []Artifact `json:"artifacts"`
 	// Provenance carries optional signer metadata.
 	Provenance *ManifestProvenance `json:"provenance,omitempty"`
+	// BuildProvenance records the source revision and build environment that
+	// produced this release. All fields are optional; an empty struct is
+	// omitted from JSON output. Consumers can use this to reproduce the build
+	// or verify that an artifact came from the declared source.
+	BuildProvenance *BuildProvenance `json:"build_provenance,omitempty"`
 }
 
 // SignedManifest is the complete on-disk structure: the manifest body plus
@@ -134,13 +169,20 @@ type SignedManifest struct {
 // artifacts is hashed and measured. The returned manifest has Artifacts sorted
 // by name so the canonical hash is stable regardless of filesystem order.
 func New(version, commit, buildDate, sbomRef, artifactDir string, files []ArtifactEntry, provenance *ManifestProvenance) (*ReleaseManifest, error) {
+	return NewWithBuildProvenance(version, commit, buildDate, sbomRef, artifactDir, files, provenance, nil)
+}
+
+// NewWithBuildProvenance is like New but also accepts a BuildProvenance that
+// records the source revision and build environment.
+func NewWithBuildProvenance(version, commit, buildDate, sbomRef, artifactDir string, files []ArtifactEntry, provenance *ManifestProvenance, bp *BuildProvenance) (*ReleaseManifest, error) {
 	m := &ReleaseManifest{
-		SchemaVersion: SchemaVersion,
-		Version:       version,
-		Commit:        commit,
-		BuildDate:     buildDate,
-		SBOMRef:       sbomRef,
-		Provenance:    provenance,
+		SchemaVersion:   SchemaVersion,
+		Version:         version,
+		Commit:          commit,
+		BuildDate:       buildDate,
+		SBOMRef:         sbomRef,
+		Provenance:      provenance,
+		BuildProvenance: bp,
 	}
 
 	for _, e := range files {

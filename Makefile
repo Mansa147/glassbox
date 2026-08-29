@@ -9,6 +9,7 @@
 .PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install \
         mutation-test-subsystems mutation-test-ci-subsystems mutation-test-subsystem-report
 .PHONY: changelog-check changelog-generate changelog-dry-run
+.PHONY: validate-docs validate-docs-determinism validate-docs-links validate-docs-flags
 .PHONY: check-bindings-byte-stable
 
 # Build variables
@@ -100,6 +101,22 @@ changelog-dry-run:
 #   make changelog-generate VERSION=v1.3.0
 changelog-generate: changelog-check
 	@bash scripts/generate-changelog.sh $(if $(VERSION),--version $(VERSION),)
+
+# Validate documentation: determinism, broken links, unknown flags
+validate-docs:
+	@bash scripts/validate-docs.sh
+
+# Validate documentation — determinism only
+validate-docs-determinism:
+	@bash scripts/validate-docs.sh --determinism
+
+# Validate documentation — internal links only
+validate-docs-links:
+	@bash scripts/validate-docs.sh --links
+
+# Validate documentation — command flag smoke check
+validate-docs-flags:
+	@bash scripts/validate-docs.sh --flags
 
 # Build all release targets
 release: changelog-check release-linux release-darwin release-windows ts-build
@@ -210,6 +227,22 @@ reproducibility-check:
 
 license-scan:
 	@bash scripts/check-licenses.sh
+
+# Compare the current SBOM against the previous release SBOM.
+# Usage: make sbom-diff PREV_SBOM=path/to/old.spdx.json NEW_SBOM=path/to/new.spdx.json
+# If PREV_SBOM is omitted, attempts to download the latest GitHub release SBOM.
+sbom-diff:
+	@if [ -z "$(PREV_SBOM)" ]; then \
+	  echo "ERROR: PREV_SBOM is not set. Provide the path to the previous release SBOM."; \
+	  echo "       Example: make sbom-diff PREV_SBOM=dist/old/glassbox-v1.0.0.spdx.json NEW_SBOM=dist/release/glassbox-v1.1.0.spdx.json"; \
+	  exit 1; \
+	fi
+	@bash scripts/sbom-diff.sh \
+	  "$(PREV_SBOM)" \
+	  "$(if $(NEW_SBOM),$(NEW_SBOM),$(DIST_DIR)/glassbox-$(VERSION).spdx.json)" \
+	  --policy license-policy.json \
+	  --output "$(if $(SBOM_DIFF_OUTPUT),$(SBOM_DIFF_OUTPUT),$(DIST_DIR)/sbom-diff.json)" \
+	  --format "$(if $(SBOM_DIFF_FORMAT),$(SBOM_DIFF_FORMAT),text)"
 
 # Run tests
 test:

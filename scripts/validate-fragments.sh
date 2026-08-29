@@ -38,7 +38,8 @@ fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 VALID_CATEGORIES="cli schema security breaking fix performance"
-VALID_AFFECTS="cli-flags json-output session-format go-api schema exit-codes"
+VALID_AFFECTS="cli-flags json-output session-format go-api schema exit-codes protocol extension"
+VALID_COMPATIBILITY="stable beta experimental deprecated removed"
 
 errors=0
 declare -A seen_prs   # pr_value -> filename for duplicate detection
@@ -165,6 +166,20 @@ validate_fragment() {
       file_errors=$((file_errors + 1))
     fi
   done
+
+  # 7. compatibility level (optional field — validate if present)
+  local compat
+  compat="$(get_field "$file" "compatibility")"
+  if [[ -n "$compat" ]]; then
+    found=0
+    for valid in $VALID_COMPATIBILITY; do
+      [[ "$compat" == "$valid" ]] && found=1 && break
+    done
+    if [[ $found -eq 0 ]]; then
+      fail "$fname: invalid compatibility '$compat' — must be one of: $VALID_COMPATIBILITY"
+      file_errors=$((file_errors + 1))
+    fi
+  fi
 
   if [[ $file_errors -eq 0 ]]; then
     ok "$fname"

@@ -27,5 +27,11 @@ breaking = false
 migration_note = ""
 
 # affects: list of affected surfaces for compatibility matrix cross-reference.
-# Valid values: cli-flags, json-output, session-format, go-api, schema, exit-codes
+# Valid values: cli-flags, json-output, session-format, go-api, schema,
+#               exit-codes, protocol, extension
 affects = ["cli-flags"]
+
+# compatibility: stability level of the affected surface after this change.
+# Valid values: stable, beta, experimental, deprecated, removed
+# Optional — omit when no stability-level change is intended.
+# compatibility = "stable"

@@ -310,11 +310,111 @@ jobs:
           path: dist/release/
           retention-days: 30
 
+  # ── SBOM diff: compare against previous release ──────────────────────────────
+  sbom-diff:
+    name: SBOM diff (supply-chain review)
+    runs-on: ubuntu-latest
+    needs: [generate-sbom]
+    # Run on tag releases and on workflow_dispatch so the diff appears in
+    # release artifacts. For PRs the diff is informational only.
+    if: always() && needs.generate-sbom.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download new SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: dist/new-sbom
+
+      - name: Find previous release SBOM
+        id: prev_sbom
+        run: |
+          # Find the most recent tag before the current one.
+          CURRENT_TAG="${{ steps.version.outputs.version }}"
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "dirty" | grep -v "${CURRENT_TAG}" | head -1 || echo "")
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+          if [ -z "${PREV_TAG}" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No previous tag found — skipping SBOM diff baseline download."
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+            # Try to download the previous SBOM from GitHub releases.
+            PREV_SBOM_URL="https://github.com/${{ github.repository }}/releases/download/${PREV_TAG}/glassbox-${PREV_TAG}.spdx.json"
+            mkdir -p dist/prev-sbom
+            if curl -fsSL --max-time 30 "${PREV_SBOM_URL}" -o "dist/prev-sbom/prev.spdx.json" 2>/dev/null; then
+              echo "downloaded=true" >> "$GITHUB_OUTPUT"
+              echo "prev_sbom_path=dist/prev-sbom/prev.spdx.json" >> "$GITHUB_OUTPUT"
+            else
+              echo "downloaded=false" >> "$GITHUB_OUTPUT"
+              echo "Could not download previous SBOM from ${PREV_SBOM_URL}"
+            fi
+          fi
+
+      - name: Run SBOM diff
+        if: steps.prev_sbom.outputs.found == 'true' && steps.prev_sbom.outputs.downloaded == 'true'
+        id: diff
+        run: |
+          NEW_SBOM="$(ls dist/new-sbom/*.spdx.json | head -1)"
+          PREV_SBOM="${{ steps.prev_sbom.outputs.prev_sbom_path }}"
+
+          mkdir -p dist/sbom-diff
+
+          # Generate both text and JSON reports.
+          bash scripts/sbom-diff.sh \
+            "${PREV_SBOM}" \
+            "${NEW_SBOM}" \
+            --policy license-policy.json \
+            --output dist/sbom-diff/sbom-diff.json \
+            --format text \
+            2>&1 | tee dist/sbom-diff/sbom-diff.txt
+
+          bash scripts/sbom-diff.sh \
+            "${PREV_SBOM}" \
+            "${NEW_SBOM}" \
+            --policy license-policy.json \
+            --format markdown \
+            > dist/sbom-diff/sbom-diff.md 2>&1 || true
+
+      - name: SBOM diff summary (no previous release)
+        if: steps.prev_sbom.outputs.found != 'true' || steps.prev_sbom.outputs.downloaded != 'true'
+        run: |
+          mkdir -p dist/sbom-diff
+          echo '{"note": "No previous release SBOM available for comparison."}' > dist/sbom-diff/sbom-diff.json
+          echo "No previous release SBOM available for comparison." > dist/sbom-diff/sbom-diff.txt
+
+      - name: Upload SBOM diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-diff-${{ steps.version.outputs.version }}
+          path: dist/sbom-diff/
+          retention-days: 30
+
   # ── Vulnerability scan: osv-scanner across all three ecosystems ─────────────
   sbom-vuln-scan:
     name: Vulnerability scan (osv-scanner)
     runs-on: ubuntu-latest
-    needs: [generate-sbom]
+    needs: [generate-sbom, sbom-diff]
 
     steps:
       - uses: actions/checkout@v7
@@ -425,6 +525,14 @@ jobs:
           COMMIT_SHA: ${{ steps.version.outputs.commit }}
           BUILD_DATE: ${{ steps.version.outputs.build_date }}
           SIGNER_IDENTITY: ci-pipeline
+          # Build provenance fields — passed to sign-manifest.sh which
+          # forwards them to generate-release-manifest via environment.
+          BUILD_SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          BUILD_SOURCE_REF: ${{ github.ref }}
+          BUILD_GO_VERSION: ""   # populated below
+          BUILD_RUNNER_OS: ${{ runner.os }}
+          BUILD_WORKFLOW: ${{ github.workflow_ref }}
+          BUILD_RUN_ID: ${{ github.run_id }}
         run: |
           if [ -z "${GLASSBOX_MANIFEST_SIGNING_KEY}" ]; then
             echo "::warning::MANIFEST_SIGNING_KEY secret is not set — skipping manifest signing."
@@ -432,6 +540,8 @@ jobs:
             echo "  Generate a key with: openssl genpkey -algorithm ed25519 -out release-key.pem"
             exit 0
           fi
+          # Capture Go version for provenance.
+          export BUILD_GO_VERSION="$(go version)"
           MANIFEST_TOOL="$(pwd)/bin/generate-release-manifest" \
             bash scripts/sign-manifest.sh dist/release
 
@@ -564,7 +674,6 @@ jobs:
             dist/release/checksums.sha256
             dist/release/version.txt
             dist/release/manifest.json
-
   # ── Determinism check: same hash on Linux and macOS ─────────────────────────
   determinism:
     name: Canonical JSON determinism (${{ matrix.os }})

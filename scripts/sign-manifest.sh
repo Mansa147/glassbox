@@ -94,6 +94,28 @@ if [ -n "${KEY_ID}" ]; then
   EXTRA_FLAGS+=(--key-id "${KEY_ID}")
 fi
 
+# ── Build provenance flags ────────────────────────────────────────────────────
+# These are populated from environment variables set by CI (see release.yml).
+# All are optional; omit silently when not set.
+if [ -n "${BUILD_SOURCE_REPOSITORY:-}" ]; then
+  EXTRA_FLAGS+=(--build-source-repository "${BUILD_SOURCE_REPOSITORY}")
+fi
+if [ -n "${BUILD_SOURCE_REF:-}" ]; then
+  EXTRA_FLAGS+=(--build-source-ref "${BUILD_SOURCE_REF}")
+fi
+if [ -n "${BUILD_GO_VERSION:-}" ]; then
+  EXTRA_FLAGS+=(--build-go-version "${BUILD_GO_VERSION}")
+fi
+if [ -n "${BUILD_RUNNER_OS:-}" ]; then
+  EXTRA_FLAGS+=(--build-runner-os "${BUILD_RUNNER_OS}")
+fi
+if [ -n "${BUILD_WORKFLOW:-}" ]; then
+  EXTRA_FLAGS+=(--build-workflow "${BUILD_WORKFLOW}")
+fi
+if [ -n "${BUILD_RUN_ID:-}" ]; then
+  EXTRA_FLAGS+=(--build-run-id "${BUILD_RUN_ID}")
+fi
+
 "${MANIFEST_TOOL}" \
   --dist        "${DIST_DIR}" \
   --version     "${VERSION}" \

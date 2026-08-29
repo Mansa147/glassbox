@@ -54,8 +54,14 @@ breaking = false
 migration_note = ""
 
 # affects: which compatibility-matrix surfaces this change touches
-# Valid values: cli-flags, json-output, session-format, go-api, schema, exit-codes
+# Valid values: cli-flags, json-output, session-format, go-api, schema,
+#               exit-codes, protocol, extension
 affects = ["cli-flags"]
+
+# compatibility: stability level of the affected surface after this change.
+# Valid values: stable, beta, experimental, deprecated, removed
+# Optional — omit when no stability-level change is intended.
+# compatibility = "stable"
 ```
 
 ---
@@ -88,6 +94,36 @@ categories (e.g. a CLI flag change that is also a breaking change), use
 5. `summary` is ≤ 120 characters.
 6. `breaking = true` fragments must have a non-empty `migration_note`.
 7. Every value in `affects` is a recognised surface name.
+8. If `compatibility` is present, it must be one of: `stable`, `beta`, `experimental`, `deprecated`, `removed`.
+
+### CI enforcement
+
+In addition to `make changelog-check`, the `changelog-fragment-check` workflow
+runs on every PR and detects whether a fragment is required based on which
+files were changed:
+
+**Fragment required** when any changed file touches a user-visible surface:
+- `cmd/glassbox/**`, `internal/cmd/**` — CLI commands and flags
+- `internal/errors/**` — stable error codes
+- `src/**` — TypeScript/JS public API
+- `docs/schema/**` — JSON schema files
+- `.api-snapshots/**` — API compatibility snapshots
+- `internal/audit/**`, `internal/signer/**` — audit/signing protocols
+- `internal/bindings/**` — bindings contract
+- `internal/session/**` — session format
+- `internal/manifest/**`, `internal/sbom/**` — release artifact formats
+- `vscode-extension/src/**` — VS Code extension API
+
+**Fragment not required** (automatically exempt):
+- `*_test.go`, `testdata/`, `test/`, `tests/` — test-only changes
+- `docs/**` (except `docs/schema/`) — pure documentation
+- `scripts/**`, `.github/**`, `Makefile`, `go.sum` — CI and tooling
+- `internal/` packages not on a user-visible surface — internal refactors
+
+**Override mechanisms** (when a change is truly internal but touches an
+otherwise-tracked path):
+- Add the label `no-fragment` to the PR in GitHub
+- Commit a `.changelog-override` file containing `no-fragment` to the PR branch
 
 ---
 
