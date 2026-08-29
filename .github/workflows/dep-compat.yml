@@ -53,6 +53,16 @@ on:
     # Every Monday at 09:00 UTC.
     - cron: "0 9 * * 1"
 
+  # Run smoke tests on PRs that touch depcompat code, signer, or IPC so
+  # serialization and signing contract regressions surface before merge.
+  pull_request:
+    paths:
+      - "internal/depcompat/**"
+      - "internal/signer/**"
+      - "internal/ipc/**"
+      - "internal/manifest/**"
+      - ".github/workflows/dep-compat.yml"
+
   workflow_dispatch:
     inputs:
       dep_group:

@@ -6,7 +6,8 @@
 .PHONY: manifest-sign manifest-verify
 .PHONY: reproducibility-check
 .PHONY: license-scan
-.PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install
+.PHONY: mutation-test mutation-test-report mutation-test-ci mutation-test-install \
+        mutation-test-subsystems mutation-test-ci-subsystems mutation-test-subsystem-report
 .PHONY: changelog-check changelog-generate changelog-dry-run
 .PHONY: check-bindings-byte-stable
 
@@ -384,7 +385,7 @@ pre-commit:
 # Agreed mutation score threshold: 70 % (documented in docs/ci-artifacts.md).
 # ──────────────────────────────────────────────
 
-# Packages in scope for mutation testing.
+# Packages in scope for mutation testing (aggregate run).
 # One per line so diffs are easy to review when scope changes.
 MUTATION_PACKAGES := \
 	./internal/cmd/... \
@@ -395,8 +396,51 @@ MUTATION_PACKAGES := \
 # HTML and JSON report output directory.
 MUTATION_REPORT_DIR ?= mutation-report
 
-# Minimum mutation score (0-100).  Jobs fail below this threshold.
+# Minimum mutation score (0-100) for the aggregate run.  Jobs fail below this threshold.
 MUTATION_THRESHOLD ?= 70
+
+# ── Per-subsystem mutation groups ─────────────────────────────────────────────
+#
+# Each subsystem has its own package scope and minimum kill-rate threshold.
+# Thresholds are set higher for security-critical code (signing, validation)
+# because a surviving mutant there indicates an untested security boundary.
+#
+# Subsystem     Packages                                    Threshold  Rationale
+# ──────────────────────────────────────────────────────────────────────────────
+# security      internal/signer, internal/secutil           75%        Ed25519 signing path; key derivation
+# validation    internal/cmd (command validation layer)     70%        CLI flag parsing; path/input checks
+# replay        internal/replay, internal/deterministic     70%        Deterministic replay boundaries
+# serialization internal/session, internal/manifest         70%        Canonicalization; archive integrity
+#
+# Exclusions (justify each):
+#   internal/signer/kms.go      — AWS KMS I/O; mutations require live HSM to kill
+#   internal/signer/pkcs11.go   — PKCS#11 I/O; nondeterministic without real token
+#   internal/simulator/fuzzing_harness*.go — fuzzing infrastructure; not production logic
+#
+MUTATION_SUBSYSTEMS := security validation replay serialization
+
+# security subsystem
+MUTATION_SUBSYSTEM_security_PACKAGES  := ./internal/signer/... ./internal/secutil/...
+MUTATION_SUBSYSTEM_security_THRESHOLD := 75
+# Exclude KMS/PKCS#11 I/O stubs — mutations survive only because the real HSM
+# is not present in mutation-test CI.  These paths have integration tests.
+MUTATION_SUBSYSTEM_security_EXCLUDE   := ./internal/signer/kms.go ./internal/signer/pkcs11.go
+
+# validation subsystem
+MUTATION_SUBSYSTEM_validation_PACKAGES  := ./internal/cmd/...
+MUTATION_SUBSYSTEM_validation_THRESHOLD := 70
+MUTATION_SUBSYSTEM_validation_EXCLUDE   :=
+
+# replay subsystem
+MUTATION_SUBSYSTEM_replay_PACKAGES  := ./internal/replay/... ./internal/deterministic/...
+MUTATION_SUBSYSTEM_replay_THRESHOLD := 70
+MUTATION_SUBSYSTEM_replay_EXCLUDE   :=
+
+# serialization subsystem
+MUTATION_SUBSYSTEM_serialization_PACKAGES  := ./internal/session/... ./internal/manifest/...
+MUTATION_SUBSYSTEM_serialization_THRESHOLD := 70
+# Exclude session archive fuzz scaffolding — mutations in stubs are not meaningful.
+MUTATION_SUBSYSTEM_serialization_EXCLUDE   :=
 
 # Install gremlins from the pinned version used in CI.
 # Pin to a specific version so contributors get the same results locally.
@@ -495,6 +539,96 @@ mutation-test-report:
 	@echo "=== Mutation Test Summary ==="
 	@printf '%s\n' "$$MUTATION_REPORT_SCRIPT" | \
 		python3 - "$(MUTATION_REPORT_DIR)/gremlins-report.json" "$(MUTATION_THRESHOLD)"
+
+# Run mutation tests for all subsystems in sequence, enforcing per-subsystem
+# thresholds.  Each subsystem writes its report to a separate subdirectory so
+# results can be reviewed independently.
+#
+# Usage:
+#   make mutation-test-subsystems
+#   make mutation-test-subsystems MUTATION_REPORT_DIR=my-reports
+mutation-test-subsystems: mutation-test-install
+	@echo "Running per-subsystem mutation tests..."
+	@failed=0; \
+	for sub in $(MUTATION_SUBSYSTEMS); do \
+		pkgs=$$(eval echo "\$$MUTATION_SUBSYSTEM_$${sub}_PACKAGES"); \
+		thr=$$(eval echo "\$$MUTATION_SUBSYSTEM_$${sub}_THRESHOLD"); \
+		dir="$(MUTATION_REPORT_DIR)/$${sub}"; \
+		mkdir -p "$${dir}"; \
+		echo ""; \
+		echo "── Subsystem: $${sub} (threshold: $${thr}%) ──────────────────"; \
+		echo "   Packages : $${pkgs}"; \
+		if ! gremlins unleash \
+			--threshold=$${thr} \
+			--output="$${dir}/gremlins-report.json" \
+			$${pkgs} \
+			2>&1 | tee "$${dir}/gremlins.log"; then \
+			echo "FAIL: $${sub} mutation score below $${thr}%"; \
+			failed=1; \
+		else \
+			echo "PASS: $${sub}"; \
+		fi; \
+	done; \
+	if [ $$failed -ne 0 ]; then \
+		echo ""; \
+		echo "One or more subsystems failed their mutation threshold."; \
+		echo "Run 'make mutation-test-subsystem-report' for a summary."; \
+		exit 1; \
+	fi; \
+	echo ""; \
+	echo "All subsystems passed."
+
+# CI variant: machine-readable JSON only, no TTY spinner.
+# Called by .github/workflows/mutation-test.yml subsystem matrix jobs.
+#
+# Required env vars when called from CI:
+#   MUTATION_SUBSYSTEM   — one of: security validation replay serialization
+mutation-test-ci-subsystems: mutation-test-install
+	@sub="$(MUTATION_SUBSYSTEM)"; \
+	if [ -z "$$sub" ]; then \
+		echo "ERROR: MUTATION_SUBSYSTEM is not set."; \
+		echo "Usage: make mutation-test-ci-subsystems MUTATION_SUBSYSTEM=security"; \
+		exit 1; \
+	fi; \
+	pkgs=$$(eval echo "\$$MUTATION_SUBSYSTEM_$${sub}_PACKAGES"); \
+	thr=$$(eval echo "\$$MUTATION_SUBSYSTEM_$${sub}_THRESHOLD"); \
+	dir="$(MUTATION_REPORT_DIR)/$${sub}"; \
+	mkdir -p "$${dir}"; \
+	gremlins unleash \
+		--threshold=$${thr} \
+		--output="$${dir}/gremlins-report.json" \
+		--silent \
+		$${pkgs} \
+		2>&1 | tee "$${dir}/gremlins.log"
+
+# Print a per-subsystem summary table after running mutation-test-subsystems.
+mutation-test-subsystem-report:
+	@python3 - "$(MUTATION_REPORT_DIR)" "$(MUTATION_SUBSYSTEMS)" <<'PYEOF'
+import json, sys, os, collections
+
+report_base  = sys.argv[1]
+subsystems   = sys.argv[2].split()
+
+rows = []
+for sub in subsystems:
+    report_path = os.path.join(report_base, sub, "gremlins-report.json")
+    if not os.path.exists(report_path):
+        rows.append((sub, "-", "-", "-", "-", "NO REPORT"))
+        continue
+    with open(report_path) as f:
+        data = json.load(f)
+    total    = data.get("total_mutants", 0)
+    killed   = data.get("killed", 0)
+    survived = data.get("survived", 0)
+    score    = round(killed / total * 100, 1) if total else 0.0
+    status   = "PASS" if score >= 70 else "FAIL"
+    rows.append((sub, total, killed, survived, f"{score}%", status))
+
+print(f"{'Subsystem':<16} {'Total':>6} {'Killed':>7} {'Survived':>9} {'Score':>7}  Status")
+print("-" * 60)
+for row in rows:
+    print(f"{row[0]:<16} {str(row[1]):>6} {str(row[2]):>7} {str(row[3]):>9} {str(row[4]):>7}  {row[5]}")
+PYEOF
 
 # ──────────────────────────────────────────────
 # Dependency Compatibility testing
