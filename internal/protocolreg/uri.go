@@ -493,3 +493,236 @@ func ParseDebugURI(raw string) (*ParsedDebugURI, error) {
 
 	return result, nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trace-step URI: glassbox://trace/<txhash>/step/<N>?network=…[&file=…][&line=…][&col=…][&view=…]
+// ─────────────────────────────────────────────────────────────────────────────
+
+const (
+	// maxStepIndex is the upper bound accepted for the step index in a trace URI.
+	// Traces with more than 65535 steps are not expected in current usage.
+	maxStepIndex = 65535
+
+	// maxFileLen is the maximum length of a URL-encoded source file path
+	// embedded in a trace-step URI.
+	maxFileLen = 4096
+)
+
+// allowedTraceViews is the set of valid view mode identifiers for trace-step
+// deep links. It overlaps with allowedViews but adds a "source" panel that is
+// only meaningful in the trace-navigation context.
+var allowedTraceViews = map[string]bool{
+	"trace":      true,
+	"source":     true,
+	"flamegraph": true,
+	"events":     true,
+	"auth":       true,
+	"budget":     true,
+	"storage":    true,
+}
+
+// ParsedTraceStepURI holds the validated fields extracted from a
+// glassbox://trace/<txhash>/step/<N> URI.
+//
+// URI format:
+//
+//	glassbox://trace/<txhash>/step/<N>?network=<n>[&file=<path>][&line=<n>][&col=<n>][&view=<mode>]
+//
+// Required parameters:
+//   - network — one of: testnet, mainnet, futurenet
+//
+// Optional parameters:
+//   - file — URL-encoded source file path for direct editor navigation
+//   - line — 1-based source line number
+//   - col  — 1-based column number
+//   - view — initial panel: trace, source, flamegraph, events, auth, budget, storage
+type ParsedTraceStepURI struct {
+	// Raw is the original unmodified URI string.
+	Raw string
+	// TransactionHash is the 64-character lowercase hex transaction hash.
+	TransactionHash string
+	// StepIndex is the zero-based step index within the execution trace.
+	StepIndex int
+	// Network is the validated network identifier.
+	Network string
+	// File is the optional URL-decoded source file path for editor navigation.
+	// Empty when not specified.
+	File string
+	// Line is the optional 1-based source line number. 0 means not specified.
+	Line int
+	// Column is the optional 1-based column number. 0 means not specified.
+	Column int
+	// View is the requested initial view panel. Empty means use the default.
+	View string
+}
+
+// ParseTraceStepURI parses and validates a glassbox://trace/ step-navigation URI.
+//
+// Returns a descriptive error for each class of invalid input (empty URI,
+// wrong scheme, wrong host, missing/malformed hash, missing step path,
+// non-numeric or negative step, missing or invalid network, unknown parameter,
+// invalid view mode).
+func ParseTraceStepURI(raw string) (*ParsedTraceStepURI, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("protocol URI must not be empty")
+	}
+	if len(raw) > maxURILen {
+		return nil, fmt.Errorf("protocol URI exceeds maximum length (%d characters, max %d)", len(raw), maxURILen)
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == 0x00 {
+			return nil, fmt.Errorf("protocol URI must not contain null bytes")
+		}
+		if raw[i] < 0x20 && raw[i] != '\t' {
+			return nil, fmt.Errorf("protocol URI must not contain control characters (found 0x%02x)", raw[i])
+		}
+	}
+	if strings.Contains(raw, "..") {
+		return nil, fmt.Errorf("protocol URI must not contain path traversal sequences")
+	}
+	if !strings.HasPrefix(raw, Scheme+"://") {
+		return nil, fmt.Errorf("invalid protocol URI: expected %s://", Scheme)
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse protocol URI: %w", err)
+	}
+
+	if parsed.Host != "trace" {
+		return nil, fmt.Errorf("invalid protocol host %q: expected \"trace\" for trace-step URIs", parsed.Host)
+	}
+
+	// Path must be /<txhash>/step/<N>
+	// url.Parse keeps the leading slash in Path; strip it.
+	rawPath := strings.TrimPrefix(parsed.EscapedPath(), "/")
+	segments := strings.Split(rawPath, "/")
+	// Expect exactly three segments: <txhash>, "step", <N>
+	if len(segments) != 3 {
+		return nil, fmt.Errorf(
+			"trace URI has wrong path structure %q: expected /<txhash>/step/<N>",
+			rawPath,
+		)
+	}
+
+	txHashRaw, err := url.PathUnescape(segments[0])
+	if err != nil {
+		return nil, fmt.Errorf("decode transaction hash: %w", err)
+	}
+	if !txHashPattern.MatchString(txHashRaw) {
+		return nil, fmt.Errorf("invalid transaction hash %q: must be a 64-character hex string", txHashRaw)
+	}
+
+	if segments[1] != "step" {
+		return nil, fmt.Errorf(
+			"trace URI is missing required path segment: expected \"step\", got %q",
+			segments[1],
+		)
+	}
+
+	stepStr, err := url.PathUnescape(segments[2])
+	if err != nil {
+		return nil, fmt.Errorf("decode step index: %w", err)
+	}
+	stepIdx, parseErr := strconv.Atoi(stepStr)
+	if parseErr != nil || stepIdx < 0 {
+		return nil, fmt.Errorf(
+			"invalid step index %q: must be a non-negative integer\n"+
+				"  Fix: use a whole number >= 0 (e.g. step/0 for the first step)",
+			stepStr,
+		)
+	}
+	if stepIdx > maxStepIndex {
+		return nil, fmt.Errorf(
+			"step index %d exceeds the maximum allowed value (%d)\n"+
+				"  Fix: use an index in the range 0–%d",
+			stepIdx, maxStepIndex, maxStepIndex,
+		)
+	}
+
+	q := parsed.Query()
+
+	// --- network (required) ---
+	network := q.Get("network")
+	if network == "" {
+		return nil, fmt.Errorf("missing required query parameter: network")
+	}
+	if !allowedNetworks[network] {
+		return nil, fmt.Errorf("invalid network %q: must be one of testnet, mainnet, futurenet", network)
+	}
+
+	result := &ParsedTraceStepURI{
+		Raw:             raw,
+		TransactionHash: txHashRaw,
+		StepIndex:       stepIdx,
+		Network:         network,
+	}
+
+	// --- file (optional) ---
+	if fileRaw := q.Get("file"); fileRaw != "" {
+		if len(fileRaw) > maxFileLen {
+			return nil, fmt.Errorf(
+				"file parameter is too long (%d characters, max %d)",
+				len(fileRaw), maxFileLen,
+			)
+		}
+		if strings.ContainsRune(fileRaw, 0) {
+			return nil, fmt.Errorf("file parameter contains null bytes and cannot be used")
+		}
+		result.File = fileRaw
+	}
+
+	// --- line (optional) ---
+	if lineStr := q.Get("line"); lineStr != "" {
+		lineVal, lineErr := strconv.Atoi(lineStr)
+		if lineErr != nil || lineVal < 1 {
+			return nil, fmt.Errorf(
+				"invalid line %q: must be a positive integer (1-based)\n"+
+					"  Fix: use a whole number >= 1",
+				lineStr,
+			)
+		}
+		result.Line = lineVal
+	}
+
+	// --- col (optional) ---
+	if colStr := q.Get("col"); colStr != "" {
+		colVal, colErr := strconv.Atoi(colStr)
+		if colErr != nil || colVal < 1 {
+			return nil, fmt.Errorf(
+				"invalid col %q: must be a positive integer (1-based)\n"+
+					"  Fix: use a whole number >= 1",
+				colStr,
+			)
+		}
+		result.Column = colVal
+	}
+
+	// --- view (optional) ---
+	if view := q.Get("view"); view != "" {
+		if !allowedTraceViews[view] {
+			return nil, fmt.Errorf(
+				"invalid view %q: must be one of trace, source, flamegraph, events, auth, budget, storage",
+				view,
+			)
+		}
+		result.View = view
+	}
+
+	// Reject unknown query parameters.
+	knownTraceParams := map[string]bool{
+		"network": true,
+		"file":    true,
+		"line":    true,
+		"col":     true,
+		"view":    true,
+	}
+	for param := range q {
+		if !knownTraceParams[param] {
+			return nil, fmt.Errorf("unknown query parameter %q", param)
+		}
+	}
+
+	return result, nil
+}

@@ -286,3 +286,274 @@ When reviewing a PR that fixes a bug, verify:
 | `test/regression/FIXTURES.md` | Naming rules, stub values, secret avoidance |
 | `test/regression/fixtures/<layer>/README.md` | Layer-specific rules |
 | `scripts/check-readme-commands.sh` | Detects stale command references in README |
+
+---
+
+## Complete worked examples
+
+The three sections below show a passing end-to-end regression test for each
+layer — RPC, replay, and CLI. Each example:
+
+- Links to an imaginary issue number.
+- Uses only canonical stub values from `internal/testhelpers`.
+- Names the failure class in a `// Failure class:` comment.
+- Runs without live services or secrets.
+
+Copy whichever example is closest to your bug and adjust the fixture and
+assertion to match the actual failure.
+
+---
+
+### Example A — RPC: `NOT_FOUND` masked as a connectivity error
+
+**Issue:** `#150` — `glassbox debug` reports "connection refused" when a
+transaction hash does not exist on the network, instead of "transaction not
+found".
+
+**Fixture file:** `test/regression/fixtures/rpc/rpc_gettransaction_notfound_issue150.json`
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32600,
+    "message": "Transaction not found"
+  }
+}
+```
+
+**Test file:** `internal/cmd/regression_example_test.go`
+
+```go
+// TestRegression_RPC_NotFound_MasqueradesAsConnectivity verifies that an RPC
+// NOT_FOUND response produces a TRANSACTION_NOT_FOUND error, not a generic
+// connectivity error.
+//
+// Original failure: debug reported "connection refused" for missing txhash. (Closes #150.)
+func TestRegression_RPC_NotFound_MasqueradesAsConnectivity(t *testing.T) {
+    // Failure class: rpc-not-found-masquerade
+
+    // 1. Arrange
+    resp := testhelpers.NewRPCFixture().NotFound().Build()
+    mock := testhelpers.NewMockRPCServer(t, resp)
+    defer mock.Close()
+
+    // 2. Act
+    _, err := debugWithRPC(t, mock.URL, testhelpers.CanonicalTxHash, testhelpers.CanonicalNetwork)
+
+    // 3. Assert
+    if err == nil {
+        t.Fatal("expected TRANSACTION_NOT_FOUND error, got nil")
+    }
+    if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+        t.Errorf("error must mention 'not found', got: %q", err.Error())
+    }
+    if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+        t.Errorf("error must not claim 'connection refused' for a NOT_FOUND response, got: %q", err.Error())
+    }
+}
+```
+
+**Run it:**
+
+```bash
+go test -run TestRegression_RPC_NotFound ./internal/cmd/...
+```
+
+**CI job:** `go-regression` in `.github/workflows/ci-test.yml`.
+
+---
+
+### Example B — Replay: budget exhaustion swallowed silently
+
+**Issue:** `#319` — `glassbox debug --load-snapshots` completes with exit 0
+when the replayed transaction hits the CPU budget limit. No error, no warning.
+
+**Fixture file:** `test/regression/fixtures/replay/replay_budget_exhausted_issue319.json`
+
+```json
+{
+  "schema_version": 1,
+  "glassbox_version": "0.0.0-test",
+  "created_at": "2026-01-01T00:00:00Z",
+  "tx_hash": "5c0a1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab",
+  "network": "testnet",
+  "entries": [
+    {
+      "timestamp": "2026-01-01T00:00:00Z",
+      "content_hash": "e3b0c44298fc1c149afbf4c8996fb924",
+      "snapshot": {
+        "ledger_entries": {},
+        "ledger_sequence": 1000
+      }
+    }
+  ]
+}
+```
+
+**Test file:** `internal/cmd/regression_example_test.go`
+
+```go
+// TestRegression_Replay_BudgetExhaustion_SilentlySwallowed verifies that a
+// replayed transaction that exhausts CPU budget returns an error instead of
+// silently succeeding.
+//
+// Original failure: --load-snapshots returned exit 0 on budget exhaustion. (Closes #319.)
+func TestRegression_Replay_BudgetExhaustion_SilentlySwallowed(t *testing.T) {
+    // Failure class: budget-exhaustion-silent
+
+    // 1. Arrange
+    simResp := testhelpers.NewSimResponseFixture().
+        WithError("ExceededInstructions").
+        WithBudgetExhausted().
+        Build()
+    runner := testhelpers.NewMockRunner(t, simResp)
+
+    // 2. Act
+    _, err := replayWithRunner(t, runner, testhelpers.CanonicalTxHash)
+
+    // 3. Assert
+    if err == nil {
+        t.Fatal("CPU budget exhaustion must return an error, not success (exit 0)")
+    }
+    if !strings.Contains(strings.ToLower(err.Error()), "budget") {
+        t.Errorf("error should mention 'budget' for CPU exhaustion, got: %q", err.Error())
+    }
+}
+```
+
+**Run it:**
+
+```bash
+go test -run TestRegression_Replay_BudgetExhaustion ./internal/cmd/...
+```
+
+---
+
+### Example C — CLI: stale `--format` value not rejected at startup
+
+**Issue:** `#230` — `glassbox debug --format yaml` prints an internal marshal
+error after the expensive simulation step instead of rejecting the flag at
+startup with a clear message.
+
+**Fixture file:** `test/regression/fixtures/cli/cli_format_yaml_rejected_issue230.env`
+
+```sh
+GLASSBOX_NETWORK=testnet
+GLASSBOX_RPC_URL=http://127.0.0.1:0
+```
+
+**Test file:** `internal/cmd/regression_example_test.go`
+
+```go
+// TestRegression_CLI_InvalidFormat_RejectedAtStartup verifies that an
+// unsupported --format value is validated before any simulation work begins.
+//
+// Original failure: --format yaml triggered a marshal error after simulation. (Closes #230.)
+func TestRegression_CLI_InvalidFormat_RejectedAtStartup(t *testing.T) {
+    // Failure class: late-validation
+
+    ctx := context.Background()
+    binaryPath := testhelpers.RequireBinary(t)
+
+    // 1. Arrange
+    fixture := testhelpers.NewCLIFixture(binaryPath,
+        "debug",
+        "--wasm", "test/regression/fixtures/cli/minimal.wasm",
+        "--format", "yaml",        // unsupported format
+        testhelpers.CanonicalTxHash,
+    ).
+        WithEnv("GLASSBOX_NETWORK", testhelpers.CanonicalNetwork).
+        ExpectFailure()
+
+    // 2. Act + 3. Assert
+    stdout, stderr, _ := fixture.Run(t, ctx)
+    combined := stdout + stderr
+
+    if !strings.Contains(combined, "yaml") {
+        t.Errorf("error should mention the unsupported format 'yaml', got: %q", combined)
+    }
+    if !strings.Contains(strings.ToLower(combined), "format") {
+        t.Errorf("error should mention '--format', got: %q", combined)
+    }
+    // Must fail before any simulation (no RPC connection attempted)
+    if strings.Contains(combined, "Connecting") || strings.Contains(combined, "Simulating") {
+        t.Errorf("flag validation must fire before simulation begins, got: %q", combined)
+    }
+}
+```
+
+**Run it:**
+
+```bash
+go test -run TestRegression_CLI_InvalidFormat ./integration/...
+```
+
+---
+
+## Validating examples and links in CI
+
+Two scripts catch stale examples automatically:
+
+```bash
+# Check that every command shown in docs/ exists in the built binary
+scripts/check-readme-commands.sh
+
+# Check that every API snapshot is current
+scripts/api-snapshot.sh check
+```
+
+Both run in the `ci-gate` job. A failing link is a blocking CI failure.
+
+To update after an intentional CLI or API change:
+
+```bash
+scripts/api-snapshot.sh generate
+go test ./internal/apicompat/... -update
+git diff .api-snapshots/ internal/apicompat/testdata/
+```
+
+---
+
+## Choosing focused test commands
+
+| Goal | Command |
+|------|---------|
+| Run every regression test | `go test -run TestRegression ./...` |
+| Run one layer | `go test -run TestRegression_RPC ./internal/cmd/...` |
+| Run a single test | `go test -run TestRegression_CLI_InvalidFormat ./integration/...` |
+| Run with race detector | `go test -race -run TestRegression ./internal/cmd/...` |
+| Run integration regressions | `go test -run TestRegression ./integration/...` |
+
+Always use `go test -run TestRegression` (not `-run Test`) so the faster
+unit tests and the slower regression tests can be isolated in CI.
+
+---
+
+## Updating changelog and compatibility artifacts
+
+When a regression fix adds a new failure-class or changes a CLI surface:
+
+1. Add a fragment to `changelog/fragments/`:
+   ```bash
+   cp changelog/fragments/example-cli-flag.toml \
+      changelog/fragments/<issue-id>-<slug>.toml
+   # Edit: set category, pr, summary, affects, breaking
+   ```
+
+2. If the fix changes a JSON output field or exit code, update the affected
+   snapshot:
+   ```bash
+   scripts/api-snapshot.sh generate   # regenerates .api-snapshots/
+   git add .api-snapshots/
+   ```
+
+3. If the fix changes an exported Go type, regenerate the Go API snapshot:
+   ```bash
+   go test ./internal/apicompat/... -update
+   git add internal/apicompat/testdata/
+   ```
+
+4. Add a row to `docs/compatibility-matrix.md` if the fix introduces a new
+   stable guarantee (e.g. "exit 2 on invalid --format").

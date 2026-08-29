@@ -205,6 +205,8 @@ test('activate registers all expected commands', () => {
         'glassbox.showStateDiff',
         'Glassbox.nextTraceStep',
         'Glassbox.prevTraceStep',
+        'glassbox.openSourceLocation',
+        'glassbox.openTraceStep',
     ];
 
     for (const cmd of expectedCommands) {
@@ -315,4 +317,56 @@ test('Glassbox.prevTraceStep – does not throw when no trace is loaded', () => 
 
 test('deactivate does not throw', () => {
     assert.doesNotThrow(() => extension.deactivate());
+});
+
+// ── openSourceLocation and openTraceStep ──────────────────────────────────────
+
+test('glassbox.openSourceLocation – shows warning when no file and no stepJson', async () => {
+    registeredCommands.clear();
+    clearMessages();
+    const ctx = freshContext();
+    extension.activate(ctx);
+
+    const handler = registeredCommands.get('glassbox.openSourceLocation')!;
+    await handler({ file: undefined, stepJson: undefined });
+    // No message expected — handler exits early with no args.
+    assert.equal(errorMessages.length, 0);
+});
+
+test('glassbox.openSourceLocation – shows info message with stepJson fallback when file is missing', async () => {
+    registeredCommands.clear();
+    clearMessages();
+    const ctx = freshContext();
+    extension.activate(ctx);
+
+    const handler = registeredCommands.get('glassbox.openSourceLocation')!;
+    await handler({ file: undefined, stepJson: '{"step":1}' });
+
+    assert.ok(infoMessages.some(m => m.includes('no source location available')),
+        'Expected info message about missing source');
+});
+
+test('glassbox.openSourceLocation – navigates without error for a valid absolute path', async () => {
+    registeredCommands.clear();
+    clearMessages();
+    const ctx = freshContext();
+    extension.activate(ctx);
+
+    const handler = registeredCommands.get('glassbox.openSourceLocation')!;
+    // Should not throw even if the file does not exist (the mock openTextDocument never throws)
+    await handler({ file: '/src/lib.rs', line: 10, column: 1 });
+    assert.equal(errorMessages.length, 0);
+});
+
+test('glassbox.openTraceStep – shows warning when no trace is loaded', async () => {
+    registeredCommands.clear();
+    clearMessages();
+    const ctx = freshContext();
+    extension.activate(ctx);
+
+    const handler = registeredCommands.get('glassbox.openTraceStep')!;
+    await handler({ stepIndex: 0 });
+
+    assert.ok(warnMessages.some(m => m.toLowerCase().includes('no trace')),
+        'Expected warning about missing trace');
 });

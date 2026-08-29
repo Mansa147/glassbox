@@ -138,6 +138,94 @@ export function toWorkspaceRelative(file: string, workspaceRoot: string): string
     return file;
 }
 
+/**
+ * Labels that describe the origin of a source frame.  The values are surfaced
+ * as decorative annotations in the VS Code extension and in CLI trace output.
+ *
+ * Keep in sync with the Go OriginClass constants in
+ * `internal/sourcemap/origin.go`.
+ */
+export type OriginLabel = 'user' | 'generated' | 'external' | 'unknown';
+
+/**
+ * Derive a human-readable origin label for a file path so the editor can
+ * annotate generated and external frames without hiding them.
+ *
+ * Classification rules (applied in priority order):
+ *  1. Path contains `target/wasm32-unknown-unknown` or ends with `.wasm`
+ *     → generated (Rust build output)
+ *  2. Path contains a Cargo registry or `.cargo/` prefix
+ *     → external (vendored/dependency code)
+ *  3. Path contains `target/` (any build directory)
+ *     → generated
+ *  4. Path is outside the workspace root (when supplied)
+ *     → external
+ *  5. Otherwise → user
+ */
+export function classifyPath(
+    rawPath: string,
+    workspaceRoot?: string,
+): OriginLabel {
+    if (!rawPath) return 'unknown';
+
+    const p = rawPath.replace(/\\/g, '/');
+
+    // Rust WASM build outputs
+    if (
+        p.includes('target/wasm32-unknown-unknown') ||
+        p.includes('target/wasm32') ||
+        p.endsWith('.wasm')
+    ) {
+        return 'generated';
+    }
+
+    // Cargo registry / external crate sources
+    if (
+        p.includes('/.cargo/registry') ||
+        p.includes('/.cargo/git') ||
+        p.includes('/registry/src/') ||
+        p.includes('.cargo/registry')
+    ) {
+        return 'external';
+    }
+
+    // Generic build directories
+    if (p.includes('/target/') || p.startsWith('target/')) {
+        return 'generated';
+    }
+
+    // Outside workspace
+    if (workspaceRoot) {
+        const root = workspaceRoot.replace(/\\/g, '/').replace(/\/$/, '');
+        if (!p.startsWith(root + '/') && p !== root) {
+            // Only label absolute paths that are definitely outside workspace;
+            // relative paths are assumed to be workspace-relative.
+            if (isAbsolutePath(p)) {
+                return 'external';
+            }
+        }
+    }
+
+    return 'user';
+}
+
+/**
+ * Return the decorative label string for an OriginLabel, matching the
+ * formatting used in CLI trace output.
+ *
+ * Examples:
+ *   originLabelText('generated') → '[generated]'
+ *   originLabelText('user')      → ''   (no decoration for user source)
+ */
+export function originLabelText(origin: OriginLabel): string {
+    switch (origin) {
+        case 'generated': return '[generated]';
+        case 'external':  return '[external]';
+        case 'unknown':   return '[unknown origin]';
+        default:          return '';
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 function isAbsolutePath(p: string): boolean {

@@ -244,3 +244,83 @@ test('toWorkspaceRelative: exact root path (not a child) is returned unchanged',
         '/root/project',
     );
 });
+
+// ── classifyPath ──────────────────────────────────────────────────────────────
+
+import { classifyPath, originLabelText } from './sourceMap';
+
+test('classifyPath: Rust WASM build output is generated', () => {
+    assert.equal(
+        classifyPath('/project/target/wasm32-unknown-unknown/release/my_contract.wasm'),
+        'generated',
+    );
+});
+
+test('classifyPath: any .wasm extension is generated', () => {
+    assert.equal(classifyPath('contract.wasm'), 'generated');
+});
+
+test('classifyPath: generic target/ directory is generated', () => {
+    assert.equal(classifyPath('/project/target/debug/build/foo.rs'), 'generated');
+});
+
+test('classifyPath: Cargo registry path is external', () => {
+    assert.equal(
+        classifyPath('/home/user/.cargo/registry/src/github.com-1ecc6299db9ec823/serde-1.0.0/src/lib.rs'),
+        'external',
+    );
+});
+
+test('classifyPath: Cargo git checkout is external', () => {
+    assert.equal(
+        classifyPath('/home/user/.cargo/git/checkouts/soroban-sdk/src/lib.rs'),
+        'external',
+    );
+});
+
+test('classifyPath: user source file under workspace is user', () => {
+    assert.equal(
+        classifyPath('/project/src/lib.rs', '/project'),
+        'user',
+    );
+});
+
+test('classifyPath: absolute path outside workspace without cargo markers is external', () => {
+    assert.equal(
+        classifyPath('/usr/lib/stellar/sdk.go', '/home/user/project'),
+        'external',
+    );
+});
+
+test('classifyPath: relative path is treated as user (workspace-relative)', () => {
+    assert.equal(classifyPath('src/lib.rs', '/project'), 'user');
+});
+
+test('classifyPath: empty path returns unknown', () => {
+    assert.equal(classifyPath(''), 'unknown');
+});
+
+test('classifyPath: Windows WASM build path is generated', () => {
+    assert.equal(
+        classifyPath('C:\\Users\\dev\\project\\target\\wasm32-unknown-unknown\\release\\c.wasm'),
+        'generated',
+    );
+});
+
+// ── originLabelText ───────────────────────────────────────────────────────────
+
+test('originLabelText: user source has no decoration', () => {
+    assert.equal(originLabelText('user'), '');
+});
+
+test('originLabelText: generated source has [generated] label', () => {
+    assert.equal(originLabelText('generated'), '[generated]');
+});
+
+test('originLabelText: external source has [external] label', () => {
+    assert.equal(originLabelText('external'), '[external]');
+});
+
+test('originLabelText: unknown origin has [unknown origin] label', () => {
+    assert.equal(originLabelText('unknown'), '[unknown origin]');
+});
