@@ -59,6 +59,10 @@ var (
 	// Deterministic replay flags
 	DeterministicSeedFlag string
 	DeterministicModeFlag bool
+
+	// Resource limit flags
+	RPCResponseLimitFlag   int64
+	RPCAggregateLimitFlag  int64
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -267,6 +271,12 @@ func init() {
 		"Set a 32-byte hex seed for deterministic replay (opt-in for reproducible simulation)")
 	rootCmd.PersistentFlags().BoolVar(&DeterministicModeFlag, "deterministic", false,
 		"Enable deterministic mode for reproducible simulation")
+
+	// Resource limit flags
+	rootCmd.PersistentFlags().Int64Var(&RPCResponseLimitFlag, "rpc-response-limit", 0,
+		"Maximum bytes per RPC response (0 = default 32 MiB, min 1 KiB)")
+	rootCmd.PersistentFlags().Int64Var(&RPCAggregateLimitFlag, "rpc-aggregate-limit", 0,
+		"Maximum total bytes across all RPC responses (0 = default 512 MiB, min 1 MiB)")
 }
 
 func checkForUpdatesAsync() {

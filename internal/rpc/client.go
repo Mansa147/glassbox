@@ -75,6 +75,11 @@ type Client struct {
 	// ResponsePayloadLimit caps the number of bytes read from any Soroban RPC
 	// response body. 0 means use DefaultResponsePayloadLimit.
 	ResponsePayloadLimit int64
+	// AggregateFetchLimit caps the total bytes fetched across all RPC responses
+	// in a session. 0 means use DefaultAggregateFetchLimit.
+	AggregateFetchLimit int64
+	// aggregateTracker tracks total bytes fetched across all requests.
+	aggregateTracker *AggregateTracker
 }
 
 func (c *Client) startMethodTimer(ctx context.Context, method string, attributes map[string]string) MethodTimer {

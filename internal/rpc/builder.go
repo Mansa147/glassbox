@@ -38,18 +38,22 @@ type clientBuilder struct {
 	replayPinnedURL string
 	// responsePayloadLimit caps response body reads; 0 means DefaultResponsePayloadLimit.
 	responsePayloadLimit int64
+	// aggregateFetchLimit caps total bytes fetched across all requests; 0 means DefaultAggregateFetchLimit.
+	aggregateFetchLimit int64
 }
 
 const defaultHTTPTimeout = 15 * time.Second
 
 func newBuilder() *clientBuilder {
 	return &clientBuilder{
-		network:          Mainnet,
-		cacheEnabled:     true,
-		methodTelemetry:  defaultMethodTelemetry(),
-		requestTimeout:   defaultHTTPTimeout,
-		failureThreshold: 5,
-		retryTimeout:     60,
+		network:            Mainnet,
+		cacheEnabled:        true,
+		methodTelemetry:     defaultMethodTelemetry(),
+		requestTimeout:      defaultHTTPTimeout,
+		failureThreshold:   5,
+		retryTimeout:        60,
+		responsePayloadLimit: 0, // Use default
+		aggregateFetchLimit:  0, // Use default
 	}
 }
 
@@ -281,6 +285,22 @@ func WithResponsePayloadLimit(n int64) ClientOption {
 	}
 }
 
+// WithAggregateFetchLimit sets the maximum total bytes the client will fetch
+// across all RPC responses in a session before returning an
+// AggregateLimitExceededError. Use 0 to keep the default (DefaultAggregateFetchLimit,
+// currently 512 MiB). Values below 1 MiB are silently clamped to 1 MiB to
+// prevent accidental breakage.
+func WithAggregateFetchLimit(n int64) ClientOption {
+	return func(b *clientBuilder) error {
+		const minLimit = 1024 * 1024
+		if n > 0 && n < minLimit {
+			n = minLimit
+		}
+		b.aggregateFetchLimit = n
+		return nil
+	}
+}
+
 // WithReplayPinProvider locks the provider pool to a single endpoint URL for
 // deterministic replay. When pinned, silent failover is disabled: if the pinned
 // provider fails the error is returned immediately with an explicit message.
@@ -450,5 +470,7 @@ func (b *clientBuilder) build() (*Client, error) {
 		failoverPolicy:       policy,
 		providerPool:         pool,
 		ResponsePayloadLimit: b.responsePayloadLimit,
+		AggregateFetchLimit: b.aggregateFetchLimit,
+		aggregateTracker:    NewAggregateTracker(b.aggregateFetchLimit),
 	}, nil
 }
