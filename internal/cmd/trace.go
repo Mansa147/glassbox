@@ -4,38 +4,64 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/dotandev/glassbox/internal/decoder"
+	"github.com/dotandev/glassbox/internal/diagnostics"
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/gasmodel"
+	"github.com/dotandev/glassbox/internal/security"
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/dotandev/glassbox/internal/trace"
 	"github.com/dotandev/glassbox/internal/visualizer"
 	"github.com/spf13/cobra"
 )
 
 var (
-	traceFile            string
-	traceThemeFlag       string
-	tracePrint           bool
-	traceNoColor         bool
-	traceExportSVG       string
-	traceOutputJSON      string
-	traceExportPath      string
-	traceExportFormat    string
-	traceExportMarkdown  string
-	traceAnnotationsFlag string
-	traceGasModelPath    string
-	traceComments        []string
-	traceMetadata        []string
-	traceVerbosity       string
-	traceDryRunFlag      bool
-	traceShowTimingFlag  bool
-	traceForceFlag       bool
-	traceFormatAlias     string // --format is a user-friendly alias for --export-format
+	traceFile                  string
+	traceThemeFlag             string
+	tracePrint                 bool
+	traceNoColor               bool
+	traceExportSVG             string
+	traceOutputJSON            string
+	traceExportPath            string
+	traceExportFormat          string
+	traceExportMarkdown        string
+	traceAnnotationsFlag       string
+	traceAnnotationsExportPath string
+	traceAnnotationsStrict     bool
+	traceBookmarksOnConflict   string
+	traceBookmarksPreview      bool
+	traceGasModelPath          string
+	traceComments              []string
+	traceMetadata              []string
+	traceVerbosity             string
+	traceDryRunFlag            bool
+	traceShowTimingFlag        bool
+	traceTimingsFlag           bool // --timings: structured phase timing via diagnostics
+	traceForceFlag             bool
+	traceFormatAlias           string // --format is a user-friendly alias for --export-format
+	traceVerifyExportFlag      string // --verify-export: verify integrity of an existing export file
+
+	// Secret scanning flags
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
+
+	// Secret scanning flags
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
+
+	// Secret scanning flags
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
+
+	// Secret scanning flags
+	secretScanModeFlag       string
+	secretScanOverrideFlag   []string
 
 	// eventSchemas is optionally populated by other subsystems (e.g. schema
 	// loading) before the trace command runs. Nil is safe — PrintExecutionTrace
@@ -73,11 +99,25 @@ Export formats (--export / --format):
   json      — machine-readable JSON, best for CI/CD and automated processing
   text      — plain text, best for simple logging or piping
 
+Reviewer comments:
+  Use --annotations to import a JSON file of reviewer comments and
+  --export-annotations to write them back out. Comments carry an author,
+  severity, and resolution state, and are anchored to a stable step ID or a
+  source location, so exports show each comment next to the step it is about.
+  Comments whose target is missing from the trace are reported as dangling and
+  still exported — add --annotations-strict to make that a hard failure.
+
 Performance notes:
   Large traces (>5 000 steps) can produce slow HTML rendering.
   Use --format json for large traces or CI pipelines.
   Use --trace-verbosity summary to reduce output size significantly.
-  Use --dry-run to validate parameters without writing any files.`,
+  Use --dry-run to validate parameters without writing any files.
+
+Export verification:
+  Use --verify-export <file> to check the integrity of an existing export.
+  The command verifies the checksum, step count, schema version recorded in
+  the companion .meta.json file, and that the file extension matches the
+  declared format.  No trace file argument is required in this mode.`,
 	Example: `  # Open the interactive trace viewer
   glassbox trace execution.json
 
@@ -109,8 +149,23 @@ Performance notes:
   glassbox trace --export report.md --format markdown \
     --comment "Reviewed with Alice" --meta env=testnet execution.json
 
+  # Import reviewer comments and render them next to the steps they target
+  glassbox trace --annotations review.json --export report.md --format markdown execution.json
+
+  # Export reviewer comments to a portable file to hand to another reviewer
+  glassbox trace --export-annotations review.json execution.json
+
+  # Fail the run if any imported comment targets a step that is not in the trace
+  glassbox trace --annotations review.json --annotations-strict execution.json
+
   # Force overwrite of an existing output file
-  glassbox trace --export trace.html --force execution.json`,
+  glassbox trace --export trace.html --force execution.json
+
+  # Verify the integrity of an existing export (checksum, step count, schema version)
+  glassbox trace --verify-export trace.json
+
+  # Verify-export exits with a non-zero code when integrity checks fail (suitable for CI)
+  glassbox trace --verify-export ./artifacts/trace.json && echo "OK"`,
 	Args: cobra.MaximumNArgs(1),
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		var failures []string
@@ -167,6 +222,13 @@ Performance notes:
 			}
 		}
 
+		// In non-interactive mode, default to --print output instead of the
+		// interactive viewer, which cannot function without a terminal.
+		if termctx.GlobalNonInteractive() && !tracePrint && traceExportPath == "" && traceExportMarkdown == "" && traceOutputJSON == "" && traceExportSVG == "" {
+			tracePrint = true
+			fmt.Fprintln(cmd.ErrOrStderr(), "Non-interactive mode: falling back to --print output")
+		}
+
 		// --export and --print are mutually exclusive.
 		if traceExportPath != "" && tracePrint {
 			failures = append(failures, "cannot specify both --export and --print\n"+
@@ -190,14 +252,31 @@ Performance notes:
 			}
 		}
 
-		// Validate --annotations file exists when set.
-		// NOTE: annotation loading (LoadAnnotationFile / BuildTraceNodeTree)
-		// is not yet implemented. The flag is accepted and validated for path
-		// correctness so the UI is consistent, but the overlay is skipped at
-		// runtime with a warning until the helper functions are available.
+		// Validate --annotations file exists when set. The file's contents are
+		// parsed and validated at run time by trace.LoadAnnotationFile; this
+		// pre-flight check only confirms the path is usable so a typo is
+		// reported alongside every other flag error in a single pass.
 		if traceAnnotationsFlag != "" {
 			if _, err := ValidateInputPath("annotations", traceAnnotationsFlag); err != nil {
 				failures = append(failures, err.Error())
+			}
+		}
+
+		// --annotations-strict only means something when annotations are
+		// actually being resolved against a trace.
+		if traceAnnotationsStrict && traceAnnotationsFlag == "" && traceAnnotationsExportPath == "" {
+			failures = append(failures,
+				"--annotations-strict requires --annotations or --export-annotations\n"+
+					"  Fix: add --annotations <file> to import comments, or drop --annotations-strict")
+		}
+
+		// --export-annotations must name a file, not a directory.
+		if traceAnnotationsExportPath != "" {
+			if strings.HasSuffix(traceAnnotationsExportPath, "/") || strings.HasSuffix(traceAnnotationsExportPath, "\\") {
+				failures = append(failures, fmt.Sprintf(
+					"--export-annotations %q looks like a directory path; provide a full file path\n"+
+						"  Fix: specify a filename (e.g. --export-annotations ./review.json)",
+					traceAnnotationsExportPath))
 			}
 		}
 
@@ -233,6 +312,13 @@ Performance notes:
 			}
 		}
 
+		// Validate --verify-export path when set.
+		if traceVerifyExportFlag != "" {
+			if _, err := ValidateInputPath("verify-export", traceVerifyExportFlag); err != nil {
+				failures = append(failures, err.Error())
+			}
+		}
+
 		if len(failures) == 1 {
 			return errors.WrapValidationError(failures[0])
 		}
@@ -247,6 +333,33 @@ Performance notes:
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// diagCollector is active only when --timings is set.
+		var diagCollector *diagnostics.Collector
+		if traceTimingsFlag {
+			diagCollector = diagnostics.NewCollector()
+		} else {
+			diagCollector = diagnostics.Noop()
+		}
+
+		// --verify-export: verify integrity of an existing export file and exit.
+		// This mode does not require a trace file argument — it only reads the
+		// export artifact and its companion .meta.json file.
+		if traceVerifyExportFlag != "" {
+			if err := trace.VerifyExport(traceVerifyExportFlag); err != nil {
+				return errors.WrapValidationError(fmt.Sprintf(
+					"export integrity check failed for %q:\n  %s\n"+
+						"  Fix: re-export the trace with 'glassbox trace --export <file> --format <fmt> <trace>'",
+					traceVerifyExportFlag, err.Error(),
+				))
+			}
+			fmt.Printf("%s Export integrity verified: %s\n",
+				visualizer.Symbol("success"), traceVerifyExportFlag)
+			return nil
+		}
+
+		// Capture the cobra context so we can check for Ctrl-C throughout.
+		ctx := cmd.Context()
+
 		// Apply theme if specified, otherwise auto-detect.
 		if traceThemeFlag != "" {
 			visualizer.SetTheme(visualizer.Theme(traceThemeFlag))
@@ -287,8 +400,10 @@ Performance notes:
 			loadStart = time.Now()
 		}
 
+		doneLoad := diagCollector.Start(diagnostics.PhaseTraceLoad)
 		data, err := os.ReadFile(filename)
 		if err != nil {
+			doneLoad(err)
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to read trace file %q: %v\n"+
 					"  Fix: ensure you have read permissions for the file",
@@ -297,6 +412,7 @@ Performance notes:
 		}
 
 		executionTrace, err := trace.FromJSON(data)
+		doneLoad(err)
 		if err != nil {
 			return errors.WrapUnmarshalFailed(err,
 				fmt.Sprintf(
@@ -353,6 +469,109 @@ Performance notes:
 			}
 		}
 
+		// --annotations: import reviewer comments from a portable annotation
+		// file. This happens before the verbosity filter runs so targets are
+		// resolved against the trace at full fidelity; a later filter that
+		// breaks an anchor is reported, not silently applied.
+		if traceAnnotationsFlag != "" {
+			file, loadErr := trace.LoadAnnotationFile(traceAnnotationsFlag)
+			if loadErr != nil {
+				return errors.WrapValidationError(loadErr.Error())
+			}
+			report, attachErr := executionTrace.AttachReviewerComments(file.Comments)
+			if attachErr != nil {
+				return errors.WrapValidationError(attachErr.Error())
+			}
+			// Dangling references are reported but never cause valid comments
+			// to be dropped; --annotations-strict turns them into an error for
+			// callers that want a hard gate (e.g. CI).
+			for _, w := range report.Warnings() {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
+			}
+			if traceAnnotationsStrict && report.HasDangling() {
+				return errors.WrapValidationError(fmt.Sprintf(
+					"%d of %d imported annotation(s) have targets that do not resolve against this trace\n"+
+						"  Fix: re-export the annotations against this trace, or drop --annotations-strict "+
+						"to import them anyway",
+					len(report.Dangling), len(file.Comments)))
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "Imported %d annotation(s) from %s (%d resolved, %d dangling)\n",
+				len(file.Comments), traceAnnotationsFlag, len(report.Resolved), len(report.Dangling))
+
+			// Bookmarks [Issue #562]: merged conflict-aware rather than
+			// overwritten, so importing a colleague's bookmarks can never
+			// silently clobber your own — a real conflict is either
+			// rejected (the default) or kept alongside the existing
+			// bookmark under a new identity, never picked for you.
+			if len(file.Bookmarks) > 0 {
+				policy, policyErr := trace.ParseBookmarkConflictPolicy(traceBookmarksOnConflict)
+				if policyErr != nil {
+					return errors.WrapValidationError(policyErr.Error())
+				}
+
+				if traceBookmarksPreview {
+					conflicts := trace.DetectBookmarkConflicts(executionTrace, executionTrace.Annotations.Bookmarks, file.Bookmarks)
+					if len(conflicts) == 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "No bookmark conflicts: %d bookmark(s) would be imported cleanly.\n", len(file.Bookmarks))
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "%d bookmark conflict(s):\n", len(conflicts))
+						for i, c := range conflicts {
+							fmt.Fprintf(cmd.OutOrStdout(), "  %d. %q vs existing %q: %s\n", i+1, c.Incoming.Name, c.Existing.Name, c.Reason)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "\nRe-run with --bookmarks-on-conflict rename or merge to keep both.\n")
+					}
+					return nil
+				}
+
+				merged, mergeResult, mergeErr := trace.MergeBookmarks(
+					executionTrace, executionTrace.Annotations.Bookmarks, file.Bookmarks, policy)
+				if mergeErr != nil {
+					return errors.WrapValidationError(mergeErr.Error())
+				}
+				executionTrace.Annotations.Bookmarks = merged
+				fmt.Fprintf(cmd.ErrOrStderr(), "Imported %d bookmark(s) (%d kept under a new identity to avoid a conflict)\n",
+					len(file.Bookmarks), len(mergeResult.Renamed))
+			}
+		}
+
+		// --export-annotations: write the trace's reviewer comments to a
+		// portable file. Exporting what was just imported is a byte-stable
+		// round trip, which is what makes annotations shareable between
+		// reviewers.
+		if traceAnnotationsExportPath != "" && !traceDryRunFlag {
+			file, exportErr := trace.ExportAnnotationFile(executionTrace, time.Now())
+			if exportErr != nil {
+				return errors.WrapValidationError(exportErr.Error())
+			}
+			if !traceForceFlag {
+				if _, statErr := os.Stat(traceAnnotationsExportPath); statErr == nil {
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"Warning: %q already exists and will be overwritten. Use --force to suppress this warning.\n",
+						traceAnnotationsExportPath)
+				}
+			}
+			if saveErr := file.Save(traceAnnotationsExportPath); saveErr != nil {
+				removeIfCancelled(ctx, traceAnnotationsExportPath)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
+				return errors.WrapValidationError(saveErr.Error())
+			}
+			fmt.Printf("%s Annotations exported to: %s (%d comment(s), %d bookmark(s))\n",
+				visualizer.Symbol("success"), traceAnnotationsExportPath, len(file.Comments), len(file.Bookmarks))
+
+			// Every other export flag in this command writes its file and
+			// exits. Composing --export-annotations with a report export is
+			// useful, so only exit when nothing else was asked for — otherwise
+			// exporting annotations alone would drop into the interactive
+			// viewer, which no other export flag does.
+			if traceExportPath == "" && traceExportMarkdown == "" && traceExportSVG == "" &&
+				traceOutputJSON == "" && !tracePrint {
+				printTimings(cmd, diagCollector, traceTimingsFlag)
+				return nil
+			}
+		}
+
 		// --dry-run: validate parameters and compatibility but write nothing.
 		if traceDryRunFlag {
 			issues := trace.ValidateExecutionTrace(executionTrace)
@@ -392,17 +611,25 @@ Performance notes:
 					err,
 				))
 			}
-			if err := os.WriteFile(traceOutputJSON, jsonData, 0o644); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			writeErr := os.WriteFile(traceOutputJSON, jsonData, 0o644)
+			doneExport(writeErr)
+			if writeErr != nil {
+				removeIfCancelled(ctx, traceOutputJSON)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to write JSON export to %q: %v\n"+
 						"  Fix: ensure you have write permissions and sufficient disk space",
-					traceOutputJSON, err,
+					traceOutputJSON, writeErr,
 				))
 			}
 			sizeStr := humanFileSize(int64(len(jsonData)))
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(jsonStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s (%s)\n", visualizer.Symbol("success"), traceOutputJSON, sizeStr)
 			return nil
 		}
@@ -420,16 +647,6 @@ Performance notes:
 
 		// --print: render a rich ASCII tree report then exit (non-interactive).
 		if tracePrint {
-			if traceAnnotationsFlag != "" {
-				// Annotation overlay for printed tree output requires LoadAnnotationFile
-				// and BuildTraceNodeTree — these are registered on the --annotations
-				// flag but the underlying helpers are not yet available in this build.
-				// Warn the user rather than silently ignoring the flag.
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"Warning: --annotations is registered but the annotation loader is not yet implemented in this build; the flag will be ignored.\n"+
-						"  The trace will be printed without annotation overlay.\n",
-				)
-			}
 			var printStart time.Time
 			if traceShowTimingFlag {
 				printStart = time.Now()
@@ -438,10 +655,13 @@ Performance notes:
 				NoColor:      traceNoColor || NoColorFlag,
 				EventSchemas: eventSchemas,
 			}
+			doneRender := diagCollector.Start(diagnostics.PhaseTraceRender)
 			trace.PrintExecutionTrace(executionTrace, opts)
+			doneRender(nil)
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  render: %s\n", time.Since(printStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			return nil
 		}
 
@@ -461,17 +681,25 @@ Performance notes:
 				fmt.Fprintf(cmd.ErrOrStderr(), "Exporting %d steps as markdown...\n", len(executionTrace.States))
 				mdStart = time.Now()
 			}
-			if err := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			mdErr := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown)
+			doneExport(mdErr)
+			if mdErr != nil {
+				removeIfCancelled(ctx, traceExportMarkdown)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as Markdown to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
-					traceExportMarkdown, err,
+					traceExportMarkdown, mdErr,
 				))
 			}
 			sizeStr := traceExportedFileSize(traceExportMarkdown)
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(mdStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), traceExportMarkdown, sizeStr)
 			return nil
 		}
@@ -539,11 +767,18 @@ Performance notes:
 			// Route through ExportWithCompatibility so size warnings and version
 			// information are correctly applied (bridges the gap between the
 			// lower-level ExportExecutionTraceWithOptions and the compatibility layer).
-			if err := trace.ExportWithCompatibility(executionTrace, traceExportFormat, traceExportPath, opts, trace.DefaultCompatibilityOptions()); err != nil {
+			doneExport := diagCollector.Start(diagnostics.PhaseTraceExport)
+			exportErr := trace.ExportWithCompatibility(executionTrace, traceExportFormat, traceExportPath, opts, trace.DefaultCompatibilityOptions())
+			doneExport(exportErr)
+			if exportErr != nil {
+				removeIfCancelled(ctx, traceExportPath)
+				if ctx.Err() != nil {
+					return ErrInterrupted
+				}
 				return errors.WrapValidationError(fmt.Sprintf(
 					"failed to export trace as %s to %q: %v\n"+
 						"  Fix: ensure the output directory exists and you have write permissions",
-					traceExportFormat, traceExportPath, err,
+					traceExportFormat, traceExportPath, exportErr,
 				))
 			}
 
@@ -551,6 +786,7 @@ Performance notes:
 			if traceShowTimingFlag {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  export: %s\n", time.Since(exportStart).Round(time.Millisecond))
 			}
+			printTimings(cmd, diagCollector, traceTimingsFlag)
 			fmt.Printf("%s Trace exported to: %s%s\n", visualizer.Symbol("success"), traceExportPath, sizeStr)
 			return nil
 		}
@@ -572,7 +808,11 @@ func init() {
 	traceCmd.Flags().StringVar(&traceExportFormat, "export-format", "html", "Trace export format: html, markdown, json, or text (use --format as an alias)")
 	traceCmd.Flags().StringVar(&traceFormatAlias, "format", "", "Export format alias for --export-format: html, markdown, json, or text")
 	traceCmd.Flags().StringVar(&traceExportMarkdown, "export-markdown", "", "Export trace as Markdown to specified file (deprecated: use --export --format markdown)")
-	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Path to a JSON file containing step annotations to overlay on the trace")
+	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Import reviewer comments from a JSON annotation file and attach them to the trace")
+	traceCmd.Flags().StringVar(&traceAnnotationsExportPath, "export-annotations", "", "Export the trace's reviewer comments to a portable JSON annotation file")
+	traceCmd.Flags().BoolVar(&traceAnnotationsStrict, "annotations-strict", false, "Fail if any imported annotation targets a step or source location missing from the trace")
+	traceCmd.Flags().StringVar(&traceBookmarksOnConflict, "bookmarks-on-conflict", "fail", "Conflict resolution policy for bookmarks imported via --annotations: fail, rename, or merge")
+	traceCmd.Flags().BoolVar(&traceBookmarksPreview, "bookmarks-preview", false, "Show bookmark conflicts from --annotations without applying them")
 	traceCmd.Flags().StringVar(&traceGasModelPath, "gas-model", "", "Gas model JSON used to annotate contract call cost estimates")
 	traceCmd.Flags().StringVar(&traceVerbosity, "trace-verbosity", "normal", "Trace detail level: summary, normal, or verbose")
 	traceCmd.Flags().StringArrayVar(&traceComments, "comment", nil, "Comment to include in exported trace artifacts; repeatable")
@@ -580,17 +820,29 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceDryRunFlag, "dry-run", false, "Validate parameters and trace data without writing any files")
 	traceCmd.Flags().BoolVar(&traceForceFlag, "force", false, "Overwrite existing output files without prompting")
 	traceCmd.Flags().BoolVar(&traceShowTimingFlag, "show-timing", false, "Print load, render, and export timing to stderr")
+	traceCmd.Flags().BoolVar(&traceTimingsFlag, "timings", false, "Print per-phase timing breakdown to stderr after the operation completes")
+	traceCmd.Flags().StringVar(&traceVerifyExportFlag, "verify-export", "", "Verify integrity of an existing export file (checksum, step count, schema version)")
+
+	// Secret scanning flags
+	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	traceCmd.Flags().StringArrayVar(&secretScanOverrideFlag, "secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
+
+	// Secret scanning flags
+	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	traceCmd.Flags().StringArrayVar(&secretScanOverrideFlag, "secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
+
+	// Secret scanning flags
+	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	traceCmd.Flags().StringArrayVar(&secretScanOverrideFlag, "secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
+
+	// Secret scanning flags
+	traceCmd.Flags().StringVar(&secretScanModeFlag, "secret-scan-mode", "", "Secret scanning mode: opt-in (warn only) or strict (block export)")
+	traceCmd.Flags().StringArrayVar(&secretScanOverrideFlag, "secret-scan-override", nil, "Paths allowed to contain secrets (for test fixtures); repeatable")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
-	_ = traceCmd.RegisterFlagCompletionFunc("export-format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("format", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"html", "markdown", "json", "text"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"summary", "normal", "verbose"}, cobra.ShellCompDirectiveNoFileComp
-	})
+	_ = traceCmd.RegisterFlagCompletionFunc("export-format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("format", completeTraceExportFormatFlag)
+	_ = traceCmd.RegisterFlagCompletionFunc("trace-verbosity", completeTraceVerbosityFlag)
 
 	rootCmd.AddCommand(traceCmd)
 }
@@ -610,8 +862,54 @@ func traceExportOptions() (trace.ExportOptions, error) {
 		}
 		metadata[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
+
+	// Parse secret scan mode
+	var scanMode security.ScannerMode
+	if secretScanModeFlag != "" {
+		switch strings.ToUpper(strings.TrimSpace(secretScanModeFlag)) {
+		case "OPT_IN":
+			scanMode = security.ModeOptIn
+		case "STRICT":
+			scanMode = security.ModeStrict
+		default:
+			return trace.ExportOptions{}, errors.WrapValidationError(
+				fmt.Sprintf(
+					"--secret-scan-mode must be either 'opt-in' or 'strict', got %q\n"+
+						"  Fix: use --secret-scan-mode opt-in (warn only) or --secret-scan-mode strict (block export)",
+					secretScanModeFlag,
+				),
+			)
+		}
+	}
+
 	return trace.ExportOptions{
-		Comments:        traceComments,
-		SessionMetadata: metadata,
+		Comments:           traceComments,
+		SessionMetadata:    metadata,
+		SecretScanMode:     scanMode,
+		SecretScanOverrides: secretScanOverrideFlag,
 	}, nil
+}
+
+// printTimings writes the diagnostics timing table to stderr when enabled.
+// It is a no-op when active is false, which keeps all non-timing code paths
+// clean without any conditional logic at each call site.
+func printTimings(cmd *cobra.Command, dc *diagnostics.Collector, active bool) {
+	if !active {
+		return
+	}
+	dc.PrintHuman(cmd.ErrOrStderr())
+}
+
+// removeIfCancelled deletes path when ctx is cancelled and the file exists.
+// It is called after a write error to ensure no partial output is left on disk
+// when the operation was interrupted by Ctrl-C.  Errors from Remove are
+// intentionally ignored — a best-effort cleanup is all we need here.
+func removeIfCancelled(ctx context.Context, path string) {
+	if ctx.Err() == nil {
+		return
+	}
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
 }

@@ -2,7 +2,74 @@
 
 ## What Changed (Latest Session)
 
-### Profile Command — CLI Ergonomics (Part A)
+### Diagnostics Bundle — `doctor --bundle` (Feature A)
+
+**New package:** `internal/diagnostics/`
+
+| File | Purpose |
+|------|---------|
+| `redact.go` | Secret-pattern matching, path redaction, config-map redaction |
+| `manifest.go` | `Manifest` struct with schema version, version meta, platform info, redacted config, check results |
+| `bundle.go` | `GenerateBundle()` — offline ZIP archive writer with README |
+| `bundle_test.go` | 9 tests: archive creation, extension validation, manifest contents, secret redaction |
+
+**Updated files:**
+- `internal/cmd/doctor.go` — `--bundle` and `--bundle-output` flags; `runDoctor` calls `runDoctorBundle` when set
+- `internal/cmd/doctor_bundle.go` — bridge from `DependencyStatus` → `diagnostics.CheckResult` with path redaction
+- `internal/cmd/doctor_bundle_test.go` — 5 tests: archive written, checks present, paths redacted, default temp-dir path, no secret material
+
+**New docs:** `docs/diagnostics-bundle.md`
+
+**Usage:**
+```sh
+glassbox doctor --bundle
+glassbox doctor --bundle --bundle-output ./glassbox-diag.gbdiag
+```
+
+**Acceptance criteria met:**
+- ✅ Bundle generated offline (no network requests)
+- ✅ Contains no private key or token material (`[REDACTED]` policy)
+- ✅ Has manifest with schema version (`schema_version: 1`)
+- ✅ Readable on another machine (standard ZIP, `.gbdiag` / `.zip`)
+- ✅ Tests assert redaction of `GLASSBOX_RPC_TOKEN` and `GLASSBOX_SENTRY_DSN`
+
+---
+
+### Structured Progress Events — `debug --progress-json` (Feature B)
+
+**New package:** `internal/progress/`
+
+| File | Purpose |
+|------|---------|
+| `event.go` | `Event`, `Phase`, `Status` types; `IsTerminal()` |
+| `sink.go` | `Sink` interface; `NopSink`, `JSONSink`, `TextSink`, `MultiSink` |
+| `emitter.go` | `Emitter` — convenience wrapper with `Start/Complete/Error/Skip` |
+| `progress_test.go` | 11 tests covering all sink types, ordering, meta, timestamps |
+
+**Updated files:**
+- `internal/cmd/debug.go` — `progress` import; `progSink`/`progEm` declared in `RunE`; fetch, simulate, analyze, export, and done phases instrumented
+- `internal/cmd/debug_progress.go` — `--progress-json` flag registration; `buildDebugSink()`; all `emit*` helper functions
+- `internal/cmd/debug_progress_test.go` — 12 tests: phase lifecycle, single operation ID, error code stability, skipped phase, stdout unaffected, timestamp ordering, meta safety, full-run ordering, fetch-fail ordering
+
+**New docs:** `docs/progress-events.md`
+
+**Usage:**
+```sh
+glassbox debug --progress-json abc123...def789
+glassbox debug --progress-json --format json abc123...def789 2>progress.ndjson
+```
+
+**Acceptance criteria met:**
+- ✅ Each phase emits `start` + terminal (`complete`/`error`/`skipped`) events
+- ✅ Failures include a stable `error_code` (snake_case)
+- ✅ `stdout` is byte-for-byte compatible when `--format json` payload output is requested
+- ✅ Events go exclusively to `stderr`
+- ✅ All events share a single `operation_id`
+- ✅ Tests validate event ordering and redaction (meta never contains secret keys)
+
+---
+
+
 **File:** `internal/cmd/profile.go`
 
 **New Validations:**

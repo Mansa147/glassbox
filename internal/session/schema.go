@@ -6,11 +6,17 @@ package session
 import (
 	"fmt"
 	"strings"
+
+	"github.com/dotandev/glassbox/internal/version"
 )
 
 // MinSupportedSchemaVersion is the oldest session schema version that can be
 // loaded without manual regeneration. Rows older than this must be re-debugged.
 const MinSupportedSchemaVersion = 1
+
+// NOTE: SchemaVersion is defined in store.go (currently 2). When a new migration
+// step is appended to migrationTable below, increment that constant to match the
+// highest toVersion in the table.
 
 // SchemaUpgradeResult describes the outcome of a schema check or migration
 // attempt so callers can decide whether to abort, warn, or proceed silently.
@@ -121,9 +127,78 @@ func SchemaVersionSummary(stored int) string {
 	return classifySchemaVersion(stored).Message
 }
 
+// migrationStep is a single schema version upgrade function.
+// It receives the session Data at the version just *below* its target and
+// mutates it in-place to reach that target. Steps must be idempotent:
+// calling a step on data that is already at or past its target must be a
+// safe no-op.
+type migrationStep struct {
+	// toVersion is the schema version produced by this step.
+	toVersion int
+	// description is a short human-readable label used in provenance entries.
+	description string
+	// migrate performs the in-place data transformation.
+	migrate func(data *Data)
+}
+
+// migrationTable is the ordered list of schema upgrade steps.
+// To add a new migration: append a new migrationStep with toVersion set to
+// the next integer and a migrate func that applies only the changes needed to
+// move from (toVersion-1) → toVersion. The table is applied in order, so
+// each step only needs to reason about the single version transition it owns.
+var migrationTable = []migrationStep{
+	{
+		toVersion:   1,
+		description: "backfill env_fingerprint",
+		migrate: func(data *Data) {
+			// v0 → v1: legacy rows may lack env_fingerprint and pinned_endpoint.
+			if data.EnvFingerprint == "" {
+				data.EnvFingerprint = BuildEnvFingerprint()
+			}
+		},
+	},
+	{
+		toVersion:   2,
+		description: "normalise status default",
+		migrate: func(data *Data) {
+			// v1 → v2: rows without a status value default to "active" so that
+			// the integrity validator never sees an empty Status field.
+			if data.Status == "" {
+				data.Status = "active"
+			}
+		},
+	},
+	{
+		toVersion:   3,
+		description: "backfill audit-chain sentinel and revision baseline",
+		migrate: func(data *Data) {
+			// v2 → v3: sessions created before the audit-chain fields existed
+			// (AuditHash, AuditSignature, PreviousSessionHash) have them as empty
+			// strings, which is correct — no backfill needed for the hash fields.
+			//
+			// Revision was added in the same release cycle. A zero revision on an
+			// existing row means "no concurrent-write protection ever applied"; we
+			// leave it at zero so the first Save after migration establishes the
+			// baseline cleanly rather than generating a false conflict.
+			//
+			// ErstVersion: rows written before version stamping existed have an
+			// empty ErstVersion — backfill a sentinel so diagnostics can tell the
+			// difference between "version unknown" and "version not recorded".
+			if data.ErstVersion == "" {
+				data.ErstVersion = "pre-v3"
+			}
+		},
+	},
+}
+
 // UpgradeSessionData migrates an in-memory session record from an older schema
-// version to the current SchemaVersion. It is safe to call on already-current
-// sessions and never modifies sessions from a newer binary.
+// version to the current SchemaVersion using the migrationTable dispatch table.
+// It is safe to call on already-current sessions and never modifies sessions
+// from a newer binary.
+//
+// Each migration step is applied in sequence so the data always advances one
+// version at a time, making it straightforward to reason about each
+// transition and to add future steps without touching existing ones.
 func UpgradeSessionData(data *Data) (upgraded bool, err error) {
 	if data == nil {
 		return false, fmt.Errorf("cannot upgrade nil session data")
@@ -137,13 +212,34 @@ func UpgradeSessionData(data *Data) (upgraded bool, err error) {
 		return false, nil
 	}
 
-	// v0 → v1: legacy rows may lack env_fingerprint and pinned_endpoint.
-	if data.SchemaVersion < 1 {
-		if data.EnvFingerprint == "" {
-			data.EnvFingerprint = BuildEnvFingerprint()
+	fromVersion := data.SchemaVersion
+
+	// Walk the migration table and apply every step whose target version is
+	// greater than the current schema version. Steps are sorted ascending by
+	// toVersion, so this produces a deterministic, gap-free upgrade path.
+	for _, step := range migrationTable {
+		if step.toVersion <= data.SchemaVersion {
+			// Already at or past this step — skip.
+			continue
 		}
+		if step.toVersion > SchemaVersion {
+			// Guard against a table that accidentally contains future steps.
+			break
+		}
+		step.migrate(data)
+		data.SchemaVersion = step.toVersion
 	}
 
+	// Ensure we land exactly on the current version even if the table has
+	// gaps (which it shouldn't, but this is a safety net).
 	data.SchemaVersion = SchemaVersion
+
+	// Record the migration in the session's provenance timeline so schema
+	// upgrades are visible in 'glassbox session provenance' output, not just
+	// inferred from the schema_version field. Best-effort: a provenance
+	// recording failure must never block the upgrade itself.
+	_ = RecordProvenance(data, ProvenanceMigrated, ActorSystem, version.Version, "",
+		fmt.Sprintf("schema upgraded from v%d to v%d", fromVersion, SchemaVersion), true)
+
 	return true, nil
 }

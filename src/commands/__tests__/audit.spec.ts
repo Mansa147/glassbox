@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import { registerAuditCommands } from '../audit';
 import * as fs from 'fs';
 import { verifyAuditLog } from '../../audit/AuditVerifier';
+import { ExitCode } from '../../exit-codes';
 
 jest.mock('../../audit/AuditVerifier');
 jest.mock('fs');
@@ -72,7 +73,7 @@ describe('Audit Commands CLI', () => {
 
             expect(verifyAuditLog).toHaveBeenCalled();
             expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('[FAIL] Verification failed'));
-            expect(processExitSpy).toHaveBeenCalledWith(1);
+            expect(processExitSpy).toHaveBeenCalledWith(ExitCode.SECURITY_ERROR);
 
             consoleErrorSpy.mockRestore();
             processExitSpy.mockRestore();
@@ -85,7 +86,7 @@ describe('Audit Commands CLI', () => {
             await program.parseAsync(['node', 'test', 'audit:verify', '--payload', '{}']);
 
             expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('You must provide either --file or all of'));
-            expect(processExitSpy).toHaveBeenCalledWith(1);
+            expect(processExitSpy).toHaveBeenCalledWith(ExitCode.VALIDATION_ERROR);
 
             consoleErrorSpy.mockRestore();
             processExitSpy.mockRestore();

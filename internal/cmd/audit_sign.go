@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dotandev/glassbox/internal/errors"
+	"github.com/dotandev/glassbox/internal/plan"
 	"github.com/dotandev/glassbox/internal/signer"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +31,9 @@ var (
 	// auditSignJSONFlag wraps the signed audit log output in a schema-versioned
 	// JSON envelope (currently a no-op pass-through; reserved for future envelope).
 	auditSignJSONFlag bool
+
+	// auditSignPlanFlag prints the execution plan without performing any signing.
+	auditSignPlanFlag bool
 
 	// auditSignSoftwareKey accepts a PKCS#8 PEM Ed25519 private key (literal
 	// PEM text or a file path). Equivalent to GLASSBOX_AUDIT_PRIVATE_KEY_PEM.
@@ -93,6 +97,7 @@ type SignedAuditLog struct {
 	Signature  string               `json:"signature"`
 	PublicKey  string               `json:"public_key"`
 	Provider   string               `json:"provider"`
+	KeyOrigin  *signer.KeyOriginMetadata `json:"key_origin,omitempty"`
 	Provenance *SignatureProvenance `json:"provenance,omitempty"`
 	Payload    json.RawMessage      `json:"payload"`
 }
@@ -217,6 +222,8 @@ func init() {
 		"Run PKCS#11 preflight checks and exit without signing")
 	auditSignCmd.Flags().BoolVar(&auditSignJSONFlag, "json", false,
 		"Wrap signed audit log output in a schema-versioned JSON envelope")
+	auditSignCmd.Flags().BoolVar(&auditSignPlanFlag, "plan", false,
+		"Print the execution plan (files, signing provider, outputs) without performing any signing")
 
 	// Provenance flags
 	auditSignCmd.Flags().StringVar(&auditSignSignerIdentity, "signer-identity", "",
@@ -235,6 +242,38 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 	// --validate-only: run PKCS#11 preflight checks and exit without signing.
 	if auditSignValidateOnly {
 		return runPkcs11Preflight(cmd)
+	}
+
+	// --plan: print execution plan without signing.
+	if auditSignPlanFlag {
+		providerName, cfg := resolveProviderAndConfig()
+		keyID := auditSignKeyID
+		if keyID == "" {
+			// Use a provider-appropriate placeholder.
+			switch providerName {
+			case "pkcs11":
+				keyID = firstNonEmpty(cfg.PKCS11KeyLabel, cfg.PKCS11KeyIDHex, "pkcs11-key")
+			default:
+				keyID = "(software key)"
+			}
+		}
+		execPlan := plan.BuildAuditPlan(plan.AuditPlanOptions{
+			PayloadFile:   auditSignPayloadFile,
+			ProviderName:  providerName,
+			KeyIdentifier: keyID,
+			Algorithm:     "ed25519",
+			CertChainFile: auditSignCertChainFile,
+		})
+		if auditSignJSONFlag {
+			jsonOut, jsonErr := execPlan.RenderJSON()
+			if jsonErr != nil {
+				return fmt.Errorf("failed to render plan: %w", jsonErr)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), jsonOut)
+		} else {
+			fmt.Fprint(cmd.OutOrStdout(), execPlan.RenderText())
+		}
+		return nil
 	}
 
 	if auditSignPayload != "" && auditSignPayloadFile != "" {
@@ -272,7 +311,30 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	hash := sha256.Sum256(canonicalPayload)
+	// Retrieve key-origin metadata before signing so it can be covered by the
+	// signature.  The metadata is non-sensitive (no PINs, no private key material).
+	keyOrigin := signerImpl.KeyOrigin()
+	keyOrigin.Provider = providerName
+
+	// Build the hash input: canonical payload + provider + key origin metadata.
+	// Including provider and key-origin in the hash ensures that any tampering
+	// with these fields after signing invalidates the signature.
+	type signedInput struct {
+		Payload   json.RawMessage          `json:"payload"`
+		Provider  string                   `json:"provider"`
+		KeyOrigin signer.KeyOriginMetadata `json:"key_origin"`
+	}
+	si := signedInput{
+		Payload:   json.RawMessage(canonicalPayload),
+		Provider:  providerName,
+		KeyOrigin: keyOrigin,
+	}
+	hashInputBytes, err := marshalCanonical(si)
+	if err != nil {
+		return errors.WrapMarshalFailed(err)
+	}
+
+	hash := sha256.Sum256(hashInputBytes)
 	signature, err := signerImpl.Sign(hash[:])
 	if err != nil {
 		return errors.WrapValidationError(fmt.Sprintf("signing failed: %v", err))
@@ -290,6 +352,7 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 		Signature: hex.EncodeToString(signature),
 		PublicKey: hex.EncodeToString(publicKey),
 		Provider:  providerName,
+		KeyOrigin: &keyOrigin,
 		Payload:   json.RawMessage(payloadBytes),
 	}
 
@@ -541,7 +604,6 @@ func validatePKCS11SignInputs(cfg signer.Pkcs11Config) error {
 		return errors.WrapValidationError(
 			"pkcs11 signing requires one of --pkcs11-key-label (CKA_LABEL) or --pkcs11-key-id (hex CKA_ID)\n" +
 				"  Fix: set GLASSBOX_PKCS11_KEY_LABEL or GLASSBOX_PKCS11_KEY_ID, or use the corresponding --pkcs11-* flag")
-	}
 	}
 
 	return nil

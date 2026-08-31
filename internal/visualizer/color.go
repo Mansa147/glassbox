@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/dotandev/glassbox/internal/termctx"
 	"github.com/mattn/go-isatty"
 )
 
@@ -39,6 +40,11 @@ func noColorSet() bool {
 
 // ColorEnabled reports whether ANSI color output should be used.
 func ColorEnabled() bool {
+	// Non-interactive mode (--non-interactive flag, CI env, or pipe) suppresses
+	// all terminal control sequences including color.
+	if termctx.GlobalNonInteractive() {
+		return false
+	}
 	// NO_COLOR / GLASSBOX_NO_COLOR / global override must always take precedence.
 	if noColorSet() {
 		return false

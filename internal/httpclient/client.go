@@ -7,11 +7,18 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/dotandev/glassbox/internal/rpc"
 )
 
 var Client = &http.Client{
 	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
+	Transport: NewRetryTransport(),
+}
+
+// NewRetryTransport creates a transport with retry logic for the default HTTP client.
+func NewRetryTransport() http.RoundTripper {
+	baseTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 
 		DialContext: (&net.Dialer{
@@ -25,5 +32,7 @@ var Client = &http.Client{
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-	},
+	}
+
+	return rpc.NewRetryTransport(rpc.DefaultRetryConfig(), baseTransport)
 }
