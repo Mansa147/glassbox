@@ -123,3 +123,14 @@ glassbox audit:sign --payload-file data.json --audit-log signed-audit.json
 # Verify the signature
 glassbox audit:verify --audit-log signed-audit.json
 ```
+
+---
+
+## Architecture Decision Records
+
+The following ADRs govern the design decisions behind KMS signing:
+
+- [ADR-006: Provider Isolation](adr/006-provider-isolation.md) — explains why the KMS provider never exposes the private key to the host process, the minimum IAM permissions required, and why there is no fallback chain.
+- [ADR-003: Trust Boundaries and Component Trust Levels](adr/003-trust-boundaries.md) — classifies the KMS provider as Tier 3 (trusted-by-configuration) and documents the controls at the signing provider boundary.
+- [ADR-007: Offline Guarantees](adr/007-offline-guarantees.md) — documents that the KMS provider requires network access for every signing call and is not compatible with air-gapped workflows.
+- [ADR-004: Data Classification and Cross-Boundary Data Flows](adr/004-data-classification.md) — confirms that only the 32-byte SHA-256 digest (not the canonical payload) crosses the boundary to the KMS API.

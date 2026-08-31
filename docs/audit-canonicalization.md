@@ -140,3 +140,13 @@ All four steps must pass for the log to be considered valid.
 - Adding new **optional** fields to the schema is backward compatible: old
   verifiers that do not know about the new field will fail to verify logs that
   include it (by design — the hash covers all fields).
+
+---
+
+## Architecture Decision Records
+
+The following ADR governs the design decisions documented on this page:
+
+- [ADR-005: Canonicalization Ownership](adr/005-canonicalization-ownership.md) — records why the Go CLI is the canonical form authority, the full invariant specification, the rationale for not adopting full RFC 8785, and the cross-language equivalence testing strategy.
+- [ADR-004: Data Classification and Cross-Boundary Data Flows](adr/004-data-classification.md) — documents that only the 32-byte hash (not the canonical payload bytes) is passed to the signing provider.
+- [ADR-006: Provider Isolation](adr/006-provider-isolation.md) — explains why canonicalization happens in the host process before the digest is handed to any provider.

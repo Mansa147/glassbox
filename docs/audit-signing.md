@@ -505,3 +505,14 @@ Common signing errors and their meanings:
 | `CKR_KEY_FUNCTION_NOT_PERMITTED` | Key lacks sign permission | Recreate key with `CKA_SIGN=true` |
 | `CKR_SESSION_CLOSED` | Session expired | Reinitialize session |
 | `CKR_DEVICE_REMOVED` | Token unplugged | Reinsert token and retry |
+
+---
+
+## Architecture Decision Records
+
+The following ADRs govern the design decisions behind audit signing:
+
+- [ADR-003: Trust Boundaries and Component Trust Levels](adr/003-trust-boundaries.md) — classifies the signing provider tier (Tier 3) and the controls that govern provider selection.
+- [ADR-006: Provider Isolation](adr/006-provider-isolation.md) — documents the isolation properties of software, PKCS#11, and KMS providers; explains why only the hash digest crosses the provider boundary.
+- [ADR-005: Canonicalization Ownership](adr/005-canonicalization-ownership.md) — specifies the canonical form and hashing algorithm whose output is passed to the signing provider.
+- [ADR-007: Offline Guarantees](adr/007-offline-guarantees.md) — documents which providers work without network access and describes the air-gapped signing pipeline.

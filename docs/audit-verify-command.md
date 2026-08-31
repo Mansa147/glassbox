@@ -120,3 +120,13 @@ glassbox audit:verify --audit-log signed-audit.json --json
 - [`glassbox audit:sign`](./audit-signing.md) — produce a signed audit log
 - [Audit canonicalization](./audit-canonicalization.md) — how the payload hash is derived
 - [KMS signing](./audit-kms-signing.md)
+
+---
+
+## Architecture Decision Records
+
+The following ADRs govern the design decisions behind audit verification:
+
+- [ADR-005: Canonicalization Ownership](adr/005-canonicalization-ownership.md) — specifies the four-step verification procedure (canonical bytes → SHA-256 → hash comparison → Ed25519 verify) and the stability guarantees that make it reproducible offline.
+- [ADR-007: Offline Guarantees](adr/007-offline-guarantees.md) — confirms that `audit:verify` requires no network access and remains functional indefinitely from only the log file and the public key.
+- [ADR-003: Trust Boundaries and Component Trust Levels](adr/003-trust-boundaries.md) — documents the trust model under which out-of-band public key verification (`--public-key`) is valid.
