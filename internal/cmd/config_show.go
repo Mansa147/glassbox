@@ -9,12 +9,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dotandev/glassbox/internal/config"
 	"github.com/spf13/cobra"
 )
 
-var configShowJSONFlag bool
+var (
+	configShowJSONFlag    bool
+	configShowExplainFlag bool
+)
 
 // configValueSource tracks where each config value came from.
 type configValueSource struct {
@@ -48,7 +52,21 @@ Config file locations searched (first match wins):
   ~/.Glassbox.toml                (home directory, legacy)
   /etc/Glassbox/config.toml       (system-wide)
 
-Use --json to output machine-readable JSON with source annotations.`,
+Use --json to output machine-readable JSON with source annotations.
+Use --explain to see a per-field resolution report showing each setting's
+source, precedence, effective value, whether a default was applied, and
+whether the value was redacted.  Secrets are never shown in plain text.`,
+	Example: `  # Human-readable config summary
+  glassbox config show
+
+  # Machine-readable JSON with source annotations
+  glassbox config show --json
+
+  # Per-field resolution report (why each value won)
+  glassbox config show --explain
+
+  # Per-field resolution report as JSON (for scripting)
+  glassbox config show --explain --json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load()
 		if err != nil {
@@ -57,6 +75,21 @@ Use --json to output machine-readable JSON with source annotations.`,
 
 		// Get the active config file source
 		configSource := config.ActiveConfigFile()
+
+		// --explain: per-field resolution report
+		if configShowExplainFlag {
+			report := config.BuildResolveReport(cfg, configSource)
+			if configShowJSONFlag {
+				data, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return fmt.Errorf("failed to marshal explain report: %w", err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(data))
+				return nil
+			}
+			printExplainReport(cmd, report)
+			return nil
+		}
 
 		if configShowJSONFlag {
 			// JSON output mode with source annotations
@@ -87,6 +120,56 @@ Use --json to output machine-readable JSON with source annotations.`,
 	},
 }
 
+// printExplainReport renders a ResolveReport in human-readable form.
+func printExplainReport(cmd *cobra.Command, report config.ResolveReport) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "Configuration resolution report")
+	fmt.Fprintln(out, strings.Repeat("─", 60))
+
+	if report.ActiveFile != "" {
+		fmt.Fprintf(out, "Highest-priority config file: %s\n\n", report.ActiveFile)
+	} else {
+		fmt.Fprintln(out, "No config file found — values come from environment variables and built-in defaults.")
+	}
+
+	// Column header
+	fmt.Fprintf(out, "  %-28s %-12s %-40s\n", "FIELD", "SOURCE", "EFFECTIVE VALUE")
+	fmt.Fprintln(out, "  "+strings.Repeat("─", 84))
+
+	for _, rv := range report.Fields {
+		source := string(rv.Source)
+		if rv.DefaultApplied {
+			source += " (default)"
+		}
+		displayVal := rv.EffectiveValue
+		if rv.Redacted {
+			displayVal = "[redacted]"
+		}
+
+		// Truncate long values so the table stays readable.
+		const maxValLen = 38
+		if len(displayVal) > maxValLen {
+			displayVal = displayVal[:maxValLen-1] + "…"
+		}
+
+		fmt.Fprintf(out, "  %-28s %-20s %s\n", rv.Field, source, displayVal)
+
+		// Show the env var or file path as an extra annotation.
+		if rv.Source == config.SourceEnvironment && rv.EnvVar != "" {
+			fmt.Fprintf(out, "    ↳ env: %s\n", rv.EnvVar)
+		} else if rv.Source == config.SourceFile && rv.FilePath != "" {
+			fmt.Fprintf(out, "    ↳ file: %s\n", rv.FilePath)
+		}
+	}
+
+	if len(report.ConflictNotes) > 0 {
+		fmt.Fprintln(out, "\nConflict resolution notes:")
+		for _, note := range report.ConflictNotes {
+			fmt.Fprintf(out, "  • %s\n", note)
+		}
+	}
+}
+
 var configCmd = &cobra.Command{
 	Use:     "config",
 	Short:   "Manage Glassbox configuration",
@@ -95,6 +178,7 @@ var configCmd = &cobra.Command{
 
 func init() {
 	configShowCmd.Flags().BoolVar(&configShowJSONFlag, "json", false, "Output configuration as JSON with source annotations")
+	configShowCmd.Flags().BoolVar(&configShowExplainFlag, "explain", false, "Show a per-field resolution report: source, precedence, effective value, and default/redaction status")
 	configCmd.AddCommand(configShowCmd)
 	rootCmd.AddCommand(configCmd)
 }

@@ -464,6 +464,59 @@ invalid --trace-verbosity "extreme" — must be one of: summary, normal, verbose
   Fix: supply metadata as key=value pairs, e.g. --meta env=testnet --meta version=1.2
 ```
 
+### `--verify-export`
+
+Verifies the integrity of an existing trace export file and exits. No trace
+file argument is required — the command only reads the export artifact and its
+companion `.meta.json` file.
+
+```sh
+glassbox trace --verify-export ./artifacts/trace.json
+```
+
+**Checks performed (in order):**
+
+1. Metadata file exists (`.meta.json` alongside the export)
+2. Metadata is valid JSON
+3. `version` field in metadata is a recognized schema version
+4. File checksum matches the SHA-256 digest recorded at export time
+5. Step count in the trace file matches the count recorded in metadata (JSON format only)
+6. File extension matches the declared format
+
+**Success output:**
+
+```
+✓ Export integrity verified: ./artifacts/trace.json
+```
+
+**Failure output examples:**
+
+```
+export integrity check failed for "trace.json":
+  checksum mismatch
+    Expected: 3b4c5d...
+    Actual:   9f2c41...
+    The trace file may have been modified or corrupted
+    Fix: re-export the trace with 'glassbox trace --export <file> --format <fmt> <trace>'
+```
+
+```
+export integrity check failed for "trace.json":
+  metadata file records unsupported schema_version "99.0"
+    Supported versions: "1.0"
+    Fix: re-export the trace with the current CLI version, or upgrade Glassbox
+```
+
+`--verify-export` exits with a non-zero code on any failure, making it suitable
+for CI gates:
+
+```sh
+glassbox trace --verify-export ./artifacts/trace.json && echo "artifact OK"
+```
+
+**Validation:** The path must exist and be readable. A missing file is caught
+in `PreRunE` alongside other flag errors.
+
 ### Multiple Validation Errors (`glassbox trace`)
 
 All failures are collected and reported together:
@@ -722,9 +775,22 @@ if err := trace.VerifyExport("./output/trace.json"); err != nil {
 |-------|----------------|
 | Metadata file missing | Descriptive note that the file can still be used but integrity cannot be verified |
 | Metadata file corrupt | `failed to parse metadata file` with corruption hint |
+| Metadata `version` field unsupported | `metadata file records unsupported schema_version` with supported list and upgrade hint |
 | Checksum mismatch | `checksum mismatch` with expected/actual values and re-export hint |
 | Step count mismatch (JSON only) | `step count mismatch` with recorded vs actual count and truncation hint |
 | Format/extension mismatch | `format mismatch` with re-export hint |
+
+**Metadata version error example:**
+
+```
+metadata file records unsupported schema_version "99.0"
+  Supported versions: "1.0"
+  Fix: re-export the trace with the current CLI version, or upgrade Glassbox
+```
+
+Metadata files produced before schema versioning was introduced carry an empty
+`version` field.  These are accepted without error — the integrity checks
+(checksum, step count, format) still apply.
 
 **Step count mismatch error example:**
 
@@ -791,11 +857,11 @@ Produces a JSON envelope of the form:
 
 | Property | Detail |
 |---|---|
-| `schema_version` | Must be a `MAJOR.MINOR` string (e.g. `"1.0"`). Use `CurrentJSONSchemaVersion` in production code. |
+| `schema_version` | Must be a `MAJOR.MINOR` string (e.g. `"1.0"`). Use `CurrentJSONSchemaVersion` in production code. Validated before writing — an invalid or unsupported version is rejected immediately. |
 | `generated_at` | Truncated to second precision in UTC for deterministic output. |
 | `trace.transaction_hash` | SHA-256 fingerprinted (`"sha256:<64 hex chars>"`) — the raw hash never appears in the file. |
 | Determinism | Calling `ExportJSON` twice with identical inputs produces identical bytes. |
-| No write-side validation | `schemaVersion` is written verbatim; validation occurs at load time via `LoadVersionedTrace`. |
+| Write-side validation | `schemaVersion` is validated with `ValidateJSONSchemaVersion` before any bytes are written, so callers learn about unsupported versions immediately. |
 
 **Example (Go):**
 
@@ -808,6 +874,20 @@ if err := os.WriteFile("trace.json", data, 0o644); err != nil {
     return err
 }
 ```
+
+**Write-side validation error example:**
+
+```
+ExportJSON called with invalid schema_version "99.0": schema_version "99.0" is not supported
+  Supported versions: "1.0"
+  Fix: use trace.CurrentJSONSchemaVersion as the schemaVersion argument
+```
+
+> **Note for tests:** If you need to deliberately produce a file with an
+> unsupported schema version (e.g. to exercise error-handling paths in
+> `LoadVersionedTrace`), use `(*ExecutionTrace).ExportJSONUnchecked` instead.
+> This variant skips the write-side validation and is only intended for test
+> code.
 
 ---
 

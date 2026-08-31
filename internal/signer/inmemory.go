@@ -5,6 +5,7 @@ package signer
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -89,4 +90,19 @@ func (s *InMemorySigner) PublicKey() ([]byte, error) {
 // Algorithm returns "ed25519".
 func (s *InMemorySigner) Algorithm() string {
 	return "ed25519"
+}
+
+// KeyOrigin returns non-sensitive metadata about the in-memory signing key.
+// The key fingerprint is the hex-encoded SHA-256 of the public key bytes.
+func (s *InMemorySigner) KeyOrigin() KeyOriginMetadata {
+	pub, ok := s.privateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return KeyOriginMetadata{Provider: "software", Algorithm: "ed25519"}
+	}
+	hash := sha256.Sum256(pub)
+	return KeyOriginMetadata{
+		Provider:       "software",
+		Algorithm:      "ed25519",
+		KeyFingerprint: hex.EncodeToString(hash[:]),
+	}
 }

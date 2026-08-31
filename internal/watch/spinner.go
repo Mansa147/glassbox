@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dotandev/glassbox/internal/termctx"
 )
 
 type Spinner struct {
@@ -41,6 +43,13 @@ func (s *Spinner) Start(message string) {
 	s.isRunning = true
 	s.mu.Unlock()
 
+	// In non-interactive mode, just print a plain status line and return.
+	// No cursor control sequences, no spinning animation.
+	if termctx.GlobalNonInteractive() {
+		_, _ = fmt.Fprintln(s.out, message)
+		return
+	}
+
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
@@ -68,6 +77,11 @@ func (s *Spinner) Stop() {
 	}
 	s.isRunning = false
 	s.mu.Unlock()
+
+	// No goroutine was started in non-interactive mode, nothing to signal.
+	if termctx.GlobalNonInteractive() {
+		return
+	}
 
 	// Signal the goroutine to exit.
 	select {

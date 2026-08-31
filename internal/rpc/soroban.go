@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -40,6 +39,31 @@ func (c *Client) selectSorobanURL() string {
 		return FuturenetSorobanURL
 	}
 	return c.SorobanURL
+}
+
+// PoolDiagnostics returns the diagnostic trace from the most recent pool
+// operation. The returned value is a snapshot; it is overwritten on the next
+// call that uses the pool.
+func (c *Client) PoolDiagnostics() AttemptDiagnostics {
+	return c.LastAttemptDiagnostics
+}
+
+// IsPinned reports whether the client's provider pool is locked to a single
+// endpoint (replay-pin mode).
+func (c *Client) IsPinned() bool {
+	if c.providerPool == nil {
+		return false
+	}
+	return c.providerPool.IsPinned()
+}
+
+// PinnedProviderURL returns the URL of the pinned endpoint when the client is
+// in replay-pin mode, or an empty string otherwise.
+func (c *Client) PinnedProviderURL() string {
+	if c.providerPool == nil {
+		return ""
+	}
+	return c.providerPool.PinnedURL()
 }
 
 // rotateSorobanURL switches to the next Soroban endpoint after a failure.
@@ -146,16 +170,17 @@ func (c *Client) GetLedgerEntries(ctx context.Context, keys []string) (map[strin
 	entries := make(map[string]string)
 	var keysToFetch []string
 
-	// Check cache if enabled
+	// Check cache if enabled. Keys are scoped by network so testnet and
+	// mainnet entries never collide even if the raw XDR key bytes are equal.
 	if c.CacheEnabled {
 		for _, key := range keys {
-			val, hit, err := Get(key)
+			val, hit, err := GetLedgerEntry(c.GetNetworkName(), key)
 			if err != nil {
 				logger.Logger.Warn("Cache read failed", "error", err)
 			}
 			if hit {
 				entries[key] = val
-				logger.Logger.Debug("Cache hit", "key", key)
+				logger.Logger.Debug("Cache hit", "key", key, "network", c.GetNetworkName())
 			} else {
 				keysToFetch = append(keysToFetch, key)
 			}
@@ -398,7 +423,7 @@ func (c *Client) getLedgerEntriesAttemptURL(ctx context.Context, keysToFetch []s
 		return nil, errors.WrapRPCResponseTooLarge(targetURL)
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "getLedgerEntries")
 	if err != nil {
 		// Record failed remote node response
 		metrics.RecordRemoteNodeResponse(targetURL, string(c.Network), false, duration)
@@ -413,6 +438,13 @@ func (c *Client) getLedgerEntriesAttemptURL(ctx context.Context, keysToFetch []s
 		metrics.RecordRemoteNodeResponse(targetURL, string(c.Network), false, duration)
 		c.recordTelemetry(targetURL, duration, false)
 		return nil, errors.WrapUnmarshalFailed(err, string(respBytes))
+	}
+
+	if err := ValidateGetLedgerEntriesResponse(targetURL, &rpcResp); err != nil {
+		logger.Logger.Error("Soroban getLedgerEntries response validation failed", "url", targetURL, "error", err)
+		metrics.RecordRemoteNodeResponse(targetURL, string(c.Network), false, duration)
+		c.recordTelemetry(targetURL, duration, false)
+		return nil, err
 	}
 
 	if rpcResp.Error != nil {
@@ -433,9 +465,10 @@ func (c *Client) getLedgerEntriesAttemptURL(ctx context.Context, keysToFetch []s
 		entries[entry.Key] = entry.Xdr
 		fetchedCount++
 
-		// Cache the new entry
+		// Cache the new entry, scoped by network so the same XDR key on
+		// testnet and mainnet is stored as a distinct row.
 		if c.CacheEnabled {
-			if err := Set(entry.Key, entry.Xdr); err != nil {
+			if err := SetLedgerEntry(c.GetNetworkName(), entry.Key, entry.Xdr); err != nil {
 				logger.Logger.Warn("Failed to cache entry", "key", entry.Key, "error", err)
 			}
 		}
@@ -486,6 +519,37 @@ type SimulateTransactionResponse struct {
 
 // SimulateTransaction calls Soroban RPC simulateTransaction using a base64 TransactionEnvelope XDR.
 func (c *Client) SimulateTransaction(ctx context.Context, envelopeXdr string) (*SimulateTransactionResponse, error) {
+	// Use the provider pool when available — it provides ordered failover,
+	// health tracking, per-attempt deadlines, and replay pinning.
+	if c.providerPool != nil {
+		var result *SimulateTransactionResponse
+		diag, err := c.providerPool.Do(ctx, func(attemptCtx context.Context, url string) (int, error) {
+			resp, attemptErr := c.simulateTransactionAttemptURL(attemptCtx, envelopeXdr, url)
+			if attemptErr != nil {
+				// Extract HTTP status if available from the error.
+				return 0, attemptErr
+			}
+			result = resp
+			return 0, nil
+		})
+		c.LastAttemptDiagnostics = diag
+		if err == nil {
+			if diag.SucceededURL != "" {
+				if c.selector != nil {
+					c.selector.RecordSuccess(diag.SucceededURL)
+				}
+				c.markSuccess(diag.SucceededURL)
+			}
+			return result, nil
+		}
+		logger.Logger.Warn("SimulateTransaction failed after all pool attempts",
+			"succeeded_url", diag.SucceededURL,
+			"attempts", len(diag.Attempts),
+		)
+		return nil, err
+	}
+
+	// Legacy path (no pool configured).
 	attempts := c.sorobanEndpointAttempts()
 	activeURL := c.selectSorobanURL()
 	var failures []NodeFailure
@@ -588,7 +652,7 @@ func (c *Client) simulateTransactionAttemptURL(ctx context.Context, envelopeXdr 
 		return nil, errors.WrapRPCResponseTooLarge(targetURL)
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "simulateTransaction")
 	if err != nil {
 		logger.Logger.Error("Soroban simulateTransaction response read failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)
@@ -600,6 +664,12 @@ func (c *Client) simulateTransactionAttemptURL(ctx context.Context, envelopeXdr 
 		logger.Logger.Error("Soroban simulateTransaction unmarshal failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)
 		return nil, errors.WrapUnmarshalFailed(err, string(respBytes))
+	}
+
+	if err := ValidateSimulateTransactionResponse(targetURL, &rpcResp); err != nil {
+		logger.Logger.Error("Soroban simulateTransaction response validation failed", "url", targetURL, "error", err)
+		c.recordTelemetry(targetURL, duration, false)
+		return nil, err
 	}
 
 	if rpcResp.Error != nil {
@@ -615,6 +685,31 @@ func (c *Client) simulateTransactionAttemptURL(ctx context.Context, envelopeXdr 
 
 // GetHealth checks the health of the Soroban RPC endpoint.
 func (c *Client) GetHealth(ctx context.Context) (*GetHealthResponse, error) {
+	// Use the provider pool when available.
+	if c.providerPool != nil {
+		var result *GetHealthResponse
+		diag, err := c.providerPool.Do(ctx, func(attemptCtx context.Context, url string) (int, error) {
+			resp, attemptErr := c.getHealthAttemptURL(attemptCtx, url)
+			if attemptErr != nil {
+				return 0, attemptErr
+			}
+			result = resp
+			return 0, nil
+		})
+		c.LastAttemptDiagnostics = diag
+		if err == nil {
+			if diag.SucceededURL != "" {
+				if c.selector != nil {
+					c.selector.RecordSuccess(diag.SucceededURL)
+				}
+				c.markSuccess(diag.SucceededURL)
+			}
+			return result, nil
+		}
+		return nil, err
+	}
+
+	// Legacy path.
 	attempts := c.sorobanEndpointAttempts()
 	activeURL := c.selectSorobanURL()
 	var failures []NodeFailure
@@ -696,7 +791,7 @@ func (c *Client) getHealthAttemptURL(ctx context.Context, targetURL string) (hea
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := c.readResponseBody(resp.Body, "getHealth")
 	if err != nil {
 		logger.Logger.Error("Soroban getHealth response read failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)
@@ -708,6 +803,12 @@ func (c *Client) getHealthAttemptURL(ctx context.Context, targetURL string) (hea
 		logger.Logger.Error("Soroban getHealth unmarshal failed", "url", targetURL, "error", err)
 		c.recordTelemetry(targetURL, duration, false)
 		return nil, errors.NewRPCError(errors.CodeRPCUnmarshalFailed, err)
+	}
+
+	if err := ValidateGetHealthResponse(targetURL, &rpcResp); err != nil {
+		logger.Logger.Error("Soroban getHealth response validation failed", "url", targetURL, "error", err)
+		c.recordTelemetry(targetURL, duration, false)
+		return nil, err
 	}
 
 	if rpcResp.Error != nil {
@@ -732,6 +833,10 @@ func (c *Client) GetLatestLedgerSequence(ctx context.Context) (int, error) {
 	var resp GetLatestLedgerResponse
 	err := c.postRequest(ctx, payload, &resp)
 	if err != nil {
+		return 0, err
+	}
+
+	if err := ValidateGetLatestLedgerResponse(c.selectSorobanURL(), &resp); err != nil {
 		return 0, err
 	}
 

@@ -15,6 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/dotandev/glassbox/internal/sourcemap"
+	"github.com/dotandev/glassbox/internal/wasmvalidate"
 )
 
 var (
@@ -54,6 +57,9 @@ type SourceLocation struct {
 	File   string
 	Line   int
 	Column int
+	// Confidence indicates the reliability of this source location.
+	// If nil, confidence is unknown (backward compatible).
+	Confidence *Confidence
 }
 
 // Frame represents a stack frame with local variable information
@@ -69,45 +75,81 @@ type Frame struct {
 type Parser struct {
 	data       *dwarf.Data
 	binaryType string // "wasm", "elf", "macho", "pe"
+	caps       *Capabilities
+	normalizer *sourcemap.PathNormalizer
 }
 
-// NewParser creates a new DWARF parser from a binary
+// Capabilities returns the DWARF capability report for the binary this parser
+// was created from. The report is computed by NewParser at construction time
+// and describes the DWARF version, present debug sections, and any structured
+// warnings (unsupported version, missing sections, or partial debug info) with
+// remediation hints. It is nil for a Parser not created via NewParser.
+func (p *Parser) Capabilities() *Capabilities {
+	return p.caps
+}
+
+// SetPathNormalizer sets the path normalizer for DWARF source path resolution.
+// This enables cross-platform path normalization, workspace root resolution,
+// and explicit remapping tables for source locations extracted from DWARF debug info.
+func (p *Parser) SetPathNormalizer(normalizer *sourcemap.PathNormalizer) {
+	p.normalizer = normalizer
+}
+
+// PathNormalizer returns the current path normalizer, or nil if not set.
+func (p *Parser) PathNormalizer() *sourcemap.PathNormalizer {
+	return p.normalizer
+}
+
+// NewParser creates a new DWARF parser from a binary. On success the returned
+// parser carries a capability report (see Parser.Capabilities) describing the
+// binary's DWARF version and available mappings.
 func NewParser(data []byte) (*Parser, error) {
 	if len(data) < 4 {
 		return nil, ErrInvalidWASM
 	}
 
-	// Detect binary type and try to parse DWARF info
-	// Check for WASM (WebAssembly) magic number
-	if data[0] == 0x00 && data[1] == 0x61 && data[2] == 0x73 && data[3] == 0x6d {
-		return parseWASM(data)
+	var parser *Parser
+	var err error
+
+	switch {
+	// Check for WASM (WebAssembly) magic number.
+	case data[0] == 0x00 && data[1] == 0x61 && data[2] == 0x73 && data[3] == 0x6d:
+		parser, err = parseWASM(data)
+
+	// Try ELF.
+	case data[0] == 0x7f && data[1] == 0x45 && data[2] == 0x4c && data[3] == 0x46:
+		parser, err = parseELF(data)
+
+	// Try Mach-O.
+	case binary.BigEndian.Uint32(data[0:4]) == 0xfeedfacf ||
+		binary.LittleEndian.Uint32(data[0:4]) == 0xfeedfacf:
+		parser, err = parseMacho(data)
+
+	// Try PE.
+	case len(data) >= 2 && binary.LittleEndian.Uint16(data[0:2]) == 0x5a4d:
+		parser, err = parsePE(data)
+
+	default:
+		return nil, ErrInvalidWASM
 	}
 
-	// Try ELF
-	if data[0] == 0x7f && data[1] == 0x45 && data[2] == 0x4c && data[3] == 0x46 {
-		return parseELF(data)
+	if err != nil {
+		return nil, err
 	}
-
-	// Try Mach-O
-	if len(data) >= 4 {
-		if binary.BigEndian.Uint32(data[0:4]) == 0xfeedfacf ||
-			binary.LittleEndian.Uint32(data[0:4]) == 0xfeedfacf {
-			return parseMacho(data)
-		}
-	}
-
-	// Try PE
-	if len(data) >= 2 {
-		if binary.LittleEndian.Uint16(data[0:2]) == 0x5a4d {
-			return parsePE(data)
-		}
-	}
-
-	return nil, ErrInvalidWASM
+	parser.caps = DetectCapabilities(data)
+	return parser, nil
 }
 
 // parseWASM parses DWARF info from a WASM binary
 func parseWASM(data []byte) (*Parser, error) {
+	// Validate module size, section bounds, function indices, and
+	// debug-section size before any deeper parsing. A corrupt or hostile
+	// module fails here with a field-specific diagnostic instead of driving
+	// unbounded work in debug/dwarf.New below.
+	if report := wasmvalidate.Validate(data, wasmvalidate.DefaultLimits()); !report.OK {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidWASM, report.Error())
+	}
+
 	sections := parseWASMSections(data)
 
 	var dwarfData *dwarf.Data
@@ -137,45 +179,30 @@ func parseWASM(data []byte) (*Parser, error) {
 // parseWASMSections parses the section table of a WASM binary and returns a
 // map of custom-section names to their content bytes.  Only custom sections
 // (section ID 0) are collected; all other sections are skipped.
+//
+// The section table itself is walked by wasmvalidate.Sections, which — unlike
+// the ad hoc walk this function used to do — treats a truncated or malformed
+// section as an error rather than silently stopping partway through the
+// module, so a corrupt trailing section can no longer masquerade as "no more
+// sections."
 func parseWASMSections(data []byte) map[string][]byte {
 	sections := make(map[string][]byte)
 
-	pos := 8 // skip 4-byte magic + 4-byte version
-	for pos < len(data) {
-		// Read section ID (1 byte).
-		if pos >= len(data) {
-			break
+	secList, _ := wasmvalidate.Sections(data, wasmvalidate.DefaultLimits())
+	for _, s := range secList {
+		if s.ID != 0 { // only custom sections carry names/debug content
+			continue
 		}
-		sectionID := data[pos]
-		pos++
+		content := data[s.PayloadOffset : s.PayloadOffset+s.Size]
 
-		// Read section size as an unsigned LEB128 varint.
-		sectionSize, n := readULEB128(data, pos)
-		if n == 0 {
-			break
+		// The first field inside a custom section is its name, length-prefixed
+		// with a LEB128 integer.
+		nameLen, m := readULEB128(content, 0)
+		if m == 0 || m+int(nameLen) > len(content) {
+			continue
 		}
-		pos += n
-
-		sectionEnd := pos + int(sectionSize)
-		if sectionEnd > len(data) {
-			break
-		}
-
-		if sectionID == 0 { // custom section
-			// The first field inside the custom section is the name, also
-			// length-prefixed with a LEB128 integer.
-			nameLen, m := readULEB128(data, pos)
-			if m == 0 || pos+m+int(nameLen) > sectionEnd {
-				pos = sectionEnd
-				continue
-			}
-			nameStart := pos + m
-			name := string(data[nameStart : nameStart+int(nameLen)])
-			content := data[nameStart+int(nameLen) : sectionEnd]
-			sections[name] = content
-		}
-
-		pos = sectionEnd
+		name := string(content[m : m+int(nameLen)])
+		sections[name] = content[m+int(nameLen):]
 	}
 
 	return sections
@@ -494,7 +521,7 @@ func (p *Parser) FindLocalVarsAt(addr uint64) ([]LocalVar, error) {
 }
 
 // GetSourceLocation finds the source location for a given address.
-// It uses the standard library's debug/dwarf line reader.
+// It uses the standard library's debug/dwarf line reader and applies path normalization.
 func (p *Parser) GetSourceLocation(addr uint64) (*SourceLocation, error) {
 	if p.data == nil {
 		return nil, ErrNoDebugInfo
@@ -516,6 +543,16 @@ func (p *Parser) GetSourceLocation(addr uint64) (*SourceLocation, error) {
 			}
 			loc := p.findLineForAddr(lr, addr)
 			if loc != nil {
+				// Apply path normalization if a normalizer is configured
+				if p.normalizer != nil {
+					normalizedPath, diag := p.normalizer.NormalizePath(loc.File)
+					if diag != nil && diag.Severity == "error" {
+						// Log the error but return the original path for compatibility
+						// The diagnostic will be available via the normalizer
+					} else if normalizedPath != "" {
+						loc.File = normalizedPath
+					}
+				}
 				return loc, nil
 			}
 		}
@@ -540,10 +577,23 @@ func (p *Parser) findLineForAddr(lr *dwarf.LineReader, addr uint64) *SourceLocat
 		// If the previous entry's address range covers addr, use that entry.
 		if hasPrev && prev.Address <= addr && addr < le.Address {
 			if prev.File != nil {
+				// Determine confidence based on DWARF data quality
+				hasLineInfo := prev.Line > 0
+				hasColumnInfo := prev.Column > 0
+				confidence := trace.ConfidenceLevelFromDWARFQuality(hasLineInfo, hasColumnInfo, false)
+
+				// If path normalization was applied and produced diagnostics, lower confidence
+				if p.normalizer != nil && len(p.normalizer.GetDiagnostics()) > 0 {
+					if confidence.Level == trace.ConfidenceExact {
+						confidence = trace.DefaultConfidence(trace.ConfidenceHigh, trace.ReasonPathNormalization)
+					}
+				}
+
 				return &SourceLocation{
-					File:   prev.File.Name,
-					Line:   prev.Line,
-					Column: prev.Column,
+					File:       prev.File.Name,
+					Line:       prev.Line,
+					Column:     prev.Column,
+					Confidence: &confidence,
 				}
 			}
 		}

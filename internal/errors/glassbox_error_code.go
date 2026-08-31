@@ -36,6 +36,42 @@ const (
 	ErstUnauthorized        ErstErrorCode = "UNAUTHORIZED"
 	// Source discovery
 	ErstSourceDiscoveryFailed ErstErrorCode = "SOURCE_DISCOVERY_FAILED"
+	// RPC response validation
+	ErstRPCInvalidResponse ErstErrorCode = "RPC_INVALID_RESPONSE"
+	// Session concurrency [Issue #813]
+	ErstSessionConflict ErstErrorCode = "SESSION_WRITE_CONFLICT"
+	ErstSessionLockHeld ErstErrorCode = "SESSION_LOCK_HELD"
+	// Analyzer resource budgets [Issue #838]
+	// ErstAnalysisTruncated is returned when the Go-side analysis pipeline
+	// (depth analyzer, cost annotator, source detector, or parser) was halted
+	// early because a configured resource budget — wall-clock timeout, maximum
+	// graph nodes, recursion depth, or input bytes — was exhausted.  Any
+	// findings emitted before truncation remain valid; findings that would
+	// have required visiting the unvisited portion are absent.
+	ErstAnalysisTruncated ErstErrorCode = "ANALYSIS_TRUNCATED"
+
+	// KMS signing [Issue #805]
+	// ErstKMSThrottled is returned when AWS KMS responds with a throttling
+	// error (ThrottlingException, TooManyRequestsException, etc.) and the
+	// retry budget is exhausted without a successful result.
+	ErstKMSThrottled ErstErrorCode = "KMS_THROTTLED"
+	// ErstKMSUnauthorized is returned when KMS rejects a Sign or GetPublicKey
+	// call due to insufficient permissions (AccessDeniedException,
+	// InvalidGrantException, or a disabled/pending-deletion key state).
+	// This is a permanent error; retrying will not help.
+	ErstKMSUnauthorized ErstErrorCode = "KMS_UNAUTHORIZED"
+	// ErstKMSTransientFailure is returned when a KMS call fails with a
+	// transient infrastructure error (InternalError, ServiceUnavailable, etc.)
+	// and the configured retry budget is exhausted.
+	ErstKMSTransientFailure ErstErrorCode = "KMS_TRANSIENT_FAILURE"
+
+	// Audit directory policy [Issue #806]
+	// ErstAuditDirPolicyViolation is returned when audit:verify-dir detects
+	// a directory-level policy violation — missing files, duplicate signer
+	// identities, inconsistent retention metadata, unexpected schema versions,
+	// or a broken hash chain — that would not be caught by per-file signature
+	// verification alone.
+	ErstAuditDirPolicyViolation ErstErrorCode = "AUDIT_DIR_POLICY_VIOLATION"
 )
 
 // ErstError wraps an error with a standardized code and preserves the original error string.
@@ -85,30 +121,40 @@ func (e *ErstError) Is(target error) bool {
 
 // Registry mapping Go errors to ErstErrorCode
 var errorCodeRegistry = map[error]ErstErrorCode{
-	ErrTransactionNotFound:  ErstTransactionNotFound,
-	ErrRPCConnectionFailed:  ErstRPCConnectionFailed,
-	ErrRPCTimeout:           ErstRPCTimeout,
-	ErrAllRPCFailed:         ErstAllRPCFailed,
-	ErrSimulatorNotFound:    ErstSimulatorNotFound,
-	ErrSimulationFailed:     ErstSimulationFailed,
-	ErrSimCrash:             ErstSimCrash,
-	ErrInvalidNetwork:       ErstInvalidNetwork,
-	ErrMarshalFailed:        ErstValidationFailed,
-	ErrUnmarshalFailed:      ErstValidationFailed,
-	ErrSimulationLogicError: ErstSimulationLogicError,
-	ErrRPCError:             ErstRPCError,
-	ErrValidationFailed:     ErstValidationFailed,
-	ErrProtocolUnsupported:  ErstValidationFailed,
-	ErrArgumentRequired:     ErstValidationFailed,
-	ErrAuditLogInvalid:      ErstValidationFailed,
-	ErrSessionNotFound:      ErstValidationFailed,
-	ErrUnauthorized:         ErstUnauthorized,
-	ErrLedgerNotFound:       ErstLedgerNotFound,
-	ErrLedgerArchived:       ErstLedgerArchived,
-	ErrRateLimitExceeded:    ErstRateLimitExceeded,
-	ErrConfigFailed:         ErstConfigFailed,
-	ErrNetworkNotFound:      ErstNetworkNotFound,
+	ErrTransactionNotFound:   ErstTransactionNotFound,
+	ErrRPCConnectionFailed:   ErstRPCConnectionFailed,
+	ErrRPCTimeout:            ErstRPCTimeout,
+	ErrAllRPCFailed:          ErstAllRPCFailed,
+	ErrSimulatorNotFound:     ErstSimulatorNotFound,
+	ErrSimulationFailed:      ErstSimulationFailed,
+	ErrSimCrash:              ErstSimCrash,
+	ErrInvalidNetwork:        ErstInvalidNetwork,
+	ErrMarshalFailed:         ErstValidationFailed,
+	ErrUnmarshalFailed:       ErstValidationFailed,
+	ErrSimulationLogicError:  ErstSimulationLogicError,
+	ErrRPCError:              ErstRPCError,
+	ErrValidationFailed:      ErstValidationFailed,
+	ErrProtocolUnsupported:   ErstValidationFailed,
+	ErrArgumentRequired:      ErstValidationFailed,
+	ErrAuditLogInvalid:       ErstValidationFailed,
+	ErrSessionNotFound:       ErstValidationFailed,
+	ErrUnauthorized:          ErstUnauthorized,
+	ErrLedgerNotFound:        ErstLedgerNotFound,
+	ErrLedgerArchived:        ErstLedgerArchived,
+	ErrRateLimitExceeded:     ErstRateLimitExceeded,
+	ErrConfigFailed:          ErstConfigFailed,
+	ErrNetworkNotFound:       ErstNetworkNotFound,
 	ErrSourceDiscoveryFailed: ErstSourceDiscoveryFailed,
+	ErrRPCInvalidResponse:    ErstRPCInvalidResponse,
+	ErrSessionConflict:       ErstSessionConflict,
+	ErrSessionLockHeld:       ErstSessionLockHeld,
+	ErrAnalysisTruncated:     ErstAnalysisTruncated,
+	// KMS signing [Issue #805]
+	ErrKMSThrottled:         ErstKMSThrottled,
+	ErrKMSUnauthorized:      ErstKMSUnauthorized,
+	ErrKMSTransientFailure:  ErstKMSTransientFailure,
+	// Audit directory policy [Issue #806]
+	ErrAuditDirPolicyViolation: ErstAuditDirPolicyViolation,
 }
 
 // ClassifyError maps an error to an ErstError with a code and preserves the original error string.

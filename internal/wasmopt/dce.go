@@ -6,6 +6,8 @@ package wasmopt
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/dotandev/glassbox/internal/wasmvalidate"
 )
 
 const (
@@ -207,26 +209,15 @@ func EliminateDeadCode(module []byte) ([]byte, Report, error) {
 }
 
 func parseSections(module []byte) ([]section, error) {
-	if len(module) < len(wasmMagic) || !bytes.Equal(module[:len(wasmMagic)], wasmMagic) {
-		return nil, fmt.Errorf("invalid wasm header")
+	secList, issues := wasmvalidate.Sections(module, wasmvalidate.DefaultLimits())
+	if len(issues) > 0 {
+		return nil, fmt.Errorf("invalid wasm module: %s", issues[0].Description)
 	}
-	pos := len(wasmMagic)
-	var sections []section
-	for pos < len(module) {
-		id := module[pos]
-		pos++
-		size, n, err := readU32(module, pos)
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		if pos+int(size) > len(module) {
-			return nil, fmt.Errorf("section length out of bounds")
-		}
-		payload := make([]byte, int(size))
-		copy(payload, module[pos:pos+int(size)])
-		sections = append(sections, section{id: id, payload: payload})
-		pos += int(size)
+	sections := make([]section, len(secList))
+	for i, s := range secList {
+		payload := make([]byte, s.Size)
+		copy(payload, module[s.PayloadOffset:s.PayloadOffset+s.Size])
+		sections[i] = section{id: s.ID, payload: payload}
 	}
 	return sections, nil
 }
