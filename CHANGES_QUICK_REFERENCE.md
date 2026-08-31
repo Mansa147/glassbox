@@ -344,6 +344,18 @@ glassbox debug \
 3. **URL Validation** - Ensures safe HTTP/HTTPS schemes
 4. **Input Sanitization** - All user inputs validated before use
 
+### Security review for new commands
+
+Every new command must pass a security review covering secrets, paths, network
+behaviour, subprocesses, output redaction, and data classification. The full
+checklist, per-domain helper reference, and two worked examples are in:
+
+**[`docs/command-security-review.md`](docs/command-security-review.md)**
+
+Copy the checklist block from that file into your PR description and mark each
+item ✅, ➖ (not applicable), or 🚧 (deferred with tracking issue) before
+requesting review.
+
 ---
 
 ## Monitoring & Observability
@@ -379,3 +391,4 @@ For issues or questions:
 2. Check `docs/trace-export-validation.md` for trace export help
 3. Run `glassbox debug --help` for CLI reference
 4. Run `glassbox doctor` for environment diagnostics
+5. Check `docs/command-security-review.md` for the security checklist required when adding a new command

@@ -684,3 +684,4 @@ Pins an RPC endpoint URL with the saved session so that when the session is resu
 - [Snapshot deduplication](./snapshot-deduplication.md)
 - [Source mapping](./source-mapping.md)
 - [Audit signing](./audit-signing.md)
+- [Command Security Review Guide](./command-security-review.md) — checklist and worked examples for secrets, paths, network, subprocesses, and output redaction required for every new command
