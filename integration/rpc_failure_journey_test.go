@@ -65,13 +65,11 @@ import (
 const rpcValidTxHash = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
 
 // Documented exit codes mirrored from internal/cmd/exitcode.go + interrupt.go.
-// Redeclared here to keep the test package free of internal imports.
+// Only the codes actually referenced in assertions are declared; unused codes
+// are omitted to keep the constant block free of dead identifiers.
 const (
-	rpcExitSuccess   = 0
-	rpcExitUser      = 1
-	rpcExitConfig    = 2
-	rpcExitInternal  = 3
-	rpcExitInterrupt = 130
+	rpcExitSuccess  = 0
+	rpcExitInternal = 3
 )
 
 // ─── fake RPC server utilities ───────────────────────────────────────────────
@@ -285,8 +283,14 @@ func TestRPCServiceUnavailable503Exhausted(t *testing.T) {
 	}
 	var hits int64
 	srv := httptest.NewServer(rpcCounting(&hits,
+		// Include Retry-After: 1 to cap the per-retry delay at 1 s, keeping the
+		// total wall time bounded well within the 20 s runner timeout.
+		// Without it, full-jitter exponential backoff can reach MaxBackoff (10 s)
+		// per retry, making the worst-case total ~30 s on slow hardware.
 		rpcFixedHandler(http.StatusServiceUnavailable,
-			rpcJSONError(-32603, "service unavailable"), nil),
+			rpcJSONError(-32603, "service unavailable"),
+			map[string]string{"Retry-After": "1"},
+		),
 	))
 	defer srv.Close()
 
@@ -326,11 +330,16 @@ func TestRPCServiceUnavailableThenSuccess(t *testing.T) {
 	_, _, err := rpcRun(t, srv.URL,
 		"debug", rpcValidTxHash, "--network", "testnet",
 	)
-	// After a successful fetch the binary may exit 0, 2 (sim not found), or 3
-	// if the simulator fails — but NOT exit 3 attributed to an RPC failure
-	// when the server answered on attempt 3.
-	if exitCode(err) == rpcExitInternal && atomic.LoadInt64(hitPtr) >= 3 {
-		t.Error("503-then-success: expected non-RPC exit after eventual server success")
+	n := atomic.LoadInt64(hitPtr)
+	// The server must have received at least 3 requests (two 503s + one 200).
+	if n < 3 {
+		t.Errorf("503-then-success: expected ≥3 requests (2 retries + 1 success), got %d", n)
+	}
+	// After the server answered successfully on attempt 3, the binary must
+	// NOT exit with an RPC-failure code (3).  Acceptable exits are 0
+	// (success), 2 (simulator not found), or any non-RPC exit.
+	if exitCode(err) == rpcExitInternal {
+		t.Errorf("503-then-success: got exit 3 (RPC failure) despite server succeeding on attempt 3; hits=%d", n)
 	}
 }
 
@@ -613,10 +622,10 @@ func TestRPCAllNodesFailed(t *testing.T) {
 		t.Skip("RPC journey test skipped in -short mode")
 	}
 	srv1 := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv1.Close()
 	srv2 := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv2.Close()
 
 	// Pass both URLs via the env var (comma-separated list).
@@ -703,7 +712,7 @@ func TestCompareCommandRPCDown(t *testing.T) {
 	_ = wasmFile.Close()
 
 	srv := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv.Close()
 
 	_, stderr, err := rpcRun(t, srv.URL,
@@ -738,7 +747,7 @@ func TestDryRunSubcommandRPCFailure(t *testing.T) {
 	_ = xdrFile.Close()
 
 	srv := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv.Close()
 
 	_, stderr, err := rpcRun(t, srv.URL,
@@ -761,7 +770,9 @@ func TestDebugDryRunNoRPCCall(t *testing.T) {
 	}
 	var hits int64
 	srv := httptest.NewServer(rpcCounting(&hits, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("debug --dry-run: unexpected RPC request to %s %s", r.Method, r.URL.Path)
+		// Do not call t.Errorf here — this handler runs in httptest's goroutine,
+		// which may outlive the test function.  The hit counter is checked after
+		// rpcRun returns, when the test goroutine is still active.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(rpcJSONResult(map[string]any{"status": "SUCCESS"}))
 	})))
@@ -830,18 +841,20 @@ func TestNoSessionOnRPCFailure(t *testing.T) {
 		name   string
 		status int
 		body   []byte
+		hdrs   map[string]string
 	}{
-		{"500", http.StatusInternalServerError, rpcJSONError(-32603, "internal error")},
-		{"503", http.StatusServiceUnavailable, rpcJSONError(-32603, "unavailable")},
-		{"401", http.StatusUnauthorized, rpcJSONError(-32001, "unauthorized")},
-		{"not_found_jsonrpc", http.StatusOK, rpcJSONError(-32001, "transaction not found")},
+		{"500", http.StatusInternalServerError, rpcJSONError(-32603, "internal error"), nil},
+		// Retry-After: 1 caps 503 backoff so worst-case total stays within 20 s.
+		{"503", http.StatusServiceUnavailable, rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}},
+		{"401", http.StatusUnauthorized, rpcJSONError(-32001, "unauthorized"), nil},
+		{"not_found_jsonrpc", http.StatusOK, rpcJSONError(-32001, "transaction not found"), nil},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := httptest.NewServer(rpcFixedHandler(tc.status, tc.body, nil))
+			srv := httptest.NewServer(rpcFixedHandler(tc.status, tc.body, tc.hdrs))
 			defer srv.Close()
 
 			_, stderr, err := rpcRun(t, srv.URL,
@@ -872,9 +885,12 @@ func TestRetryCountEnforcement(t *testing.T) {
 		retryable   bool
 		maxExpected int64
 	}{
+		// Retryable codes: all include Retry-After: 1 to cap per-retry delay at
+		// 1 s so worst-case total stays well within the 20 s runner timeout.
 		{"429", http.StatusTooManyRequests, map[string]string{"Retry-After": "1"}, true, maxRetryable},
-		{"503", http.StatusServiceUnavailable, nil, true, maxRetryable},
-		{"504", http.StatusGatewayTimeout, nil, true, maxRetryable},
+		{"503", http.StatusServiceUnavailable, map[string]string{"Retry-After": "1"}, true, maxRetryable},
+		{"504", http.StatusGatewayTimeout, map[string]string{"Retry-After": "1"}, true, maxRetryable},
+		// Non-retryable codes: single attempt (+ ≤2 health/staleness checks).
 		{"500", http.StatusInternalServerError, nil, false, maxSingleShot},
 		{"400", http.StatusBadRequest, nil, false, maxSingleShot},
 		{"404", http.StatusNotFound, nil, false, maxSingleShot},
@@ -921,8 +937,8 @@ func TestExitCodeStabilityAcrossFailures(t *testing.T) {
 			wantCode: rpcExitInternal,
 		},
 		{
-			name:     "503_exhausted",
-			handler:  rpcFixedHandler(http.StatusServiceUnavailable, rpcJSONError(-32603, "unavailable"), nil),
+			name:    "503_exhausted",
+			handler: rpcFixedHandler(http.StatusServiceUnavailable, rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}),
 			wantCode: rpcExitInternal,
 		},
 		{
@@ -985,7 +1001,7 @@ func TestRPCErrorOnStderr(t *testing.T) {
 		t.Skip("RPC journey test skipped in -short mode")
 	}
 	srv := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv.Close()
 
 	stdout, stderr, err := rpcRun(t, srv.URL,
@@ -1009,7 +1025,7 @@ func TestPartialArtifactSafety(t *testing.T) {
 	traceOut := t.TempDir() + "/trace.json"
 
 	srv := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv.Close()
 
 	_, _, err := rpcRun(t, srv.URL,
@@ -1060,7 +1076,7 @@ func TestRPCFailureJSONOutputClean(t *testing.T) {
 		t.Skip("RPC journey test skipped in -short mode")
 	}
 	srv := httptest.NewServer(rpcFixedHandler(http.StatusServiceUnavailable,
-		rpcJSONError(-32603, "unavailable"), nil))
+		rpcJSONError(-32603, "unavailable"), map[string]string{"Retry-After": "1"}))
 	defer srv.Close()
 
 	stdout, stderr, err := rpcRun(t, srv.URL,
