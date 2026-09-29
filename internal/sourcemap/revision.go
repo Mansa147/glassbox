@@ -5,6 +5,7 @@ package sourcemap
 
 import (
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 )

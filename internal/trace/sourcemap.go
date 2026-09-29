@@ -110,8 +110,23 @@ func MergeDebugSymbols(expectedContractID string) error {
 				"match_kind", result.MatchKind)
 
 			if summary := result.UserSummary(); summary != "" {
-				fmt.Fprintf(os.Stderr, "  Source mapping: %s\n", summary)
+				// Prepend origin prefix so the developer immediately knows
+				// whether this location is in their own code, a registry
+				// crate, or a git dependency.
+				prefix := result.Origin.OriginPrefix()
+				if prefix != "" {
+					fmt.Fprintf(os.Stderr, "  Source mapping: %s %s\n", prefix, summary)
+				} else {
+					fmt.Fprintf(os.Stderr, "  Source mapping: %s\n", summary)
+				}
 			}
+
+			// Show the external URL (docs.rs / GitHub commit) when one was
+			// generated, in addition to (or instead of) the workspace link.
+			if result.ExternalURL != "" {
+				fmt.Fprintf(os.Stderr, "  External URL: %s\n", result.ExternalURL)
+			}
+
 			if result.SourceLink != "" {
 				fmt.Fprintf(os.Stderr, "  Source link: %s", result.SourceLink)
 				if result.LinkProvenance != "" {

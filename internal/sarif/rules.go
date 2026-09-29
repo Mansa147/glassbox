@@ -77,6 +77,12 @@ type SecurityWarning struct {
 	WasmOffset uint64
 	// Function is the host function that triggered the warning.
 	Function string
+	// ExternalURL is a web-accessible permalink for File, populated by the
+	// sourcemap pipeline when the file is a registry crate (docs.rs) or a
+	// git dependency (GitHub commit link).  When non-empty it is used as
+	// artifactLocation.uri in the SARIF output so reviewers get a clickable
+	// link rather than a machine-local path.
+	ExternalURL string
 }
 
 // SourceMapRules returns the GB1xxx rules, ordered by rule ID.

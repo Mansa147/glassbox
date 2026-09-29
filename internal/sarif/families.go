@@ -110,11 +110,17 @@ func offsetLocation(offset uint64) Location {
 	}
 }
 
-// physicalLocation builds a physical location for a resolved source line. The
-// region is omitted when the line is unknown, which keeps the result
-// schema-valid instead of emitting an invalid startLine of 0.
-func physicalLocation(uri string, line int) *PhysicalLocation {
-	loc := &PhysicalLocation{ArtifactLocation: ArtifactLocation{URI: uri}}
+// physicalLocation builds a physical location for a resolved source line.
+// When externalURL is non-empty it is used as the URI (giving reviewers a
+// web-accessible link); otherwise the raw file path is used. The region is
+// omitted when the line is unknown, which keeps the result schema-valid
+// instead of emitting an invalid startLine of 0.
+func physicalLocation(uri, externalURL string, line int) *PhysicalLocation {
+	effectiveURI := uri
+	if externalURL != "" {
+		effectiveURI = externalURL
+	}
+	loc := &PhysicalLocation{ArtifactLocation: ArtifactLocation{URI: effectiveURI}}
 	if line > 0 {
 		loc.Region = &Region{StartLine: line}
 	}
@@ -127,7 +133,7 @@ func ResultForSourceMapFailure(f SourceMapFailure, artifactURI string) Result {
 
 	loc := offsetLocation(f.Offset)
 	if artifactURI != "" {
-		loc.PhysicalLocation = physicalLocation(artifactURI, 0)
+		loc.PhysicalLocation = physicalLocation(artifactURI, "", 0)
 	}
 
 	return Result{
@@ -144,6 +150,9 @@ func ResultForSourceMapFailure(f SourceMapFailure, artifactURI string) Result {
 }
 
 // ResultForSecurityWarning converts one security warning to a SARIF result.
+// When w.ExternalURL is non-empty it is used as the artifactLocation.uri so
+// that SARIF consumers receive a web-accessible permalink rather than a
+// machine-local file path.
 func ResultForSecurityWarning(w SecurityWarning, artifactURI string) Result {
 	message := securityWarningMessage(w)
 	locationURI := w.File
@@ -153,8 +162,14 @@ func ResultForSecurityWarning(w SecurityWarning, artifactURI string) Result {
 
 	var loc Location
 	if w.File != "" {
+		// Use ExternalURL as the primary URI when available; fall back to the
+		// local file path so the SARIF result always has a URI.
+		fileURI := w.File
+		if w.ExternalURL != "" {
+			fileURI = w.ExternalURL
+		}
 		loc = Location{
-			PhysicalLocation: physicalLocation(w.File, w.Line),
+			PhysicalLocation: physicalLocation(fileURI, "", w.Line),
 			LogicalLocation: &LogicalLocation{
 				Name: w.Function,
 				Kind: LogicalLocationKindHostFunction,
@@ -163,7 +178,7 @@ func ResultForSecurityWarning(w SecurityWarning, artifactURI string) Result {
 	} else {
 		loc = offsetLocation(w.WasmOffset)
 		if artifactURI != "" {
-			loc.PhysicalLocation = physicalLocation(artifactURI, 0)
+			loc.PhysicalLocation = physicalLocation(artifactURI, "", 0)
 		}
 	}
 
@@ -272,6 +287,7 @@ func mergeDiagnosticLog(
 		}
 		return run.Results[i].Message.Text < run.Results[j].Message.Text
 	})
+	base.Runs[0] = run
 	return base
 }
 

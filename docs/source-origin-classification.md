@@ -18,12 +18,31 @@ dependencies — without parsing raw file paths manually.
 
 ---
 
+## SourceOrigin — in-process integer enum
+
+In addition to the JSON-stable `OriginClass` string enum, the source-mapping
+pipeline uses a `SourceOrigin` integer enum for internal link generation and
+terminal output.  The two types are kept consistent by `ClassifySourcePath`.
+
+| Constant | Value | Terminal prefix | Link generated |
+|---|---|---|---|
+| `OriginUnknownSource` | `0` | *(none)* | None |
+| `OriginLocal` | `1` | `[local]` | None — file is on the developer's machine only |
+| `OriginRegistry` | `2` | `[crates.io]` | docs.rs permalink for the exact crate version |
+| `OriginGit` | `3` | `[git]` | GitHub permalink anchored to the pinned Cargo.lock commit |
+
+`OriginClass` (the string enum used in JSON exports) remains the canonical
+published schema value.  `SourceOrigin` is an implementation detail of the
+Go source-mapping pipeline.
+
+---
+
 ## Where it appears
 
 ### JSON trace export
 
-Every `ExecutionState.source_ref` object in a trace JSON export now carries
-an `origin_class` field:
+Every `ExecutionState.source_ref` object in a trace JSON export carries an
+`origin_class` field:
 
 ```json
 {
@@ -50,17 +69,56 @@ an `origin_class` field:
 The field is omitted when the value is `"user"` or empty (via `omitempty`) to
 keep the common case compact. Parsers should treat a missing field as `"user"`.
 
-### Terminal trace output (formatter and split pane)
+### `FallbackResult` fields
 
-Generated and external frames are annotated inline after the source location:
+`internal/sourcemap.FallbackResult` carries two new fields populated by
+`MappingResolver.Resolve`:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `Origin` | `SourceOrigin` | In-process origin classification for the resolved file |
+| `ExternalURL` | `string` | Web-accessible permalink; empty for local files |
+
+`ExternalURL` is set for `OriginRegistry` (docs.rs URL) and `OriginGit`
+(GitHub commit permalink).  It is always empty for `OriginLocal` and
+`OriginUnknownSource` because local workspace files have no external URL.
+
+### Terminal trace output
+
+The terminal printer (via `MergeDebugSymbols` in `internal/trace/sourcemap.go`)
+prepends the origin prefix to the source mapping summary line and prints the
+external URL on a separate line when one was generated:
 
 ```
-source: target/wasm32-unknown-unknown/release/build/foo.rs:5  [generated]
-source: /home/user/.cargo/registry/src/serde-1.0.0/src/lib.rs:200  [external]
-source: src/lib.rs:42
+  Source mapping: [local] src/lib.rs:42 (confidence 100, exact_offset)
+  Source mapping: [crates.io] .../serde-1.0.203/src/lib.rs:200 (confidence 72, function)
+  External URL: https://docs.rs/crate/serde/1.0.203/source/src/lib.rs
+  Source mapping: [git] .../soroban-sdk/.../src/token.rs:15 (confidence 100, exact_offset)
+  External URL: https://github.com/stellar/rs-soroban-sdk/blob/a1b2c3.../src/token.rs
 ```
 
-User frames (`"user"`) and unknown frames (`""`) produce no extra annotation.
+User frames (`OriginLocal`) and unknown frames produce no extra annotation.
+
+### SARIF output (`artifactLocation.uri`)
+
+When `SecurityWarning.ExternalURL` is non-empty the SARIF writer uses it as
+`artifactLocation.uri` instead of the raw local file path.  This gives GitHub
+Advanced Security, VS Code's SARIF viewer, and other SARIF consumers a
+clickable, web-accessible link:
+
+```json
+{
+  "physicalLocation": {
+    "artifactLocation": {
+      "uri": "https://docs.rs/crate/serde/1.0.203/source/src/lib.rs"
+    },
+    "region": { "startLine": 200 }
+  }
+}
+```
+
+For local workspace files the raw path is preserved, keeping the result
+schema-valid while pointing the developer directly at their source.
 
 ### Trap diagnostics (`FormatTrapInfo`)
 
@@ -80,8 +138,9 @@ The same label appears on the `Location:` line of a trap report:
 
 ## Classification rules
 
-The classifier in `internal/sourcemap/origin.go` applies these rules in
-priority order. The first match wins.
+### `OriginClass` (JSON schema, `internal/sourcemap/origin.go`)
+
+The `Classifier.Classify` method applies these rules in priority order.
 
 | Priority | Pattern | Class |
 |---|---|---|
@@ -94,9 +153,76 @@ priority order. The first match wins.
 | 7 | Absolute path outside configured `ProjectRoot` | `external` |
 | 8 | Everything else | `user` |
 
-The rules are conservative: a path that does not match any build-output or
-dependency pattern is classified as `user` so developer frames are never
-accidentally hidden or mislabelled.
+### `SourceOrigin` (in-process enum, `ClassifySourcePath`)
+
+`ClassifySourcePath(rawPath, workspaceRoot, cargoHome)` applies these rules:
+
+| Priority | Pattern | `SourceOrigin` |
+|---|---|---|
+| 1 | Path is empty | `OriginUnknownSource` |
+| 2 | Contains `/.cargo/git` or `/git/checkouts/` | `OriginGit` |
+| 3 | Contains `/.cargo/registry` or `/registry/src/` | `OriginRegistry` |
+| 4 | `cargoHome` prefix + `/git/` | `OriginGit` |
+| 5 | `cargoHome` prefix + `/registry/` | `OriginRegistry` |
+| 6 | Absolute path inside `workspaceRoot` | `OriginLocal` |
+| 7 | Relative path (always workspace-relative) | `OriginLocal` |
+| 8 | Absolute path outside `workspaceRoot` | `OriginUnknownSource` |
+| 9 | No `workspaceRoot` configured | `OriginLocal` (conservative) |
+
+---
+
+## Cargo.lock parsing for git dependencies
+
+`ExtractGitOrigin(sourcePath, cargoLockPath)` finds the `[[package]]` entry
+in Cargo.lock whose `source` field is a `git+https://...` URL and whose crate
+name appears in the git checkout directory embedded in `sourcePath`.
+
+**Cargo.lock entry format parsed:**
+
+```toml
+[[package]]
+name    = "soroban-sdk"
+version = "21.7.6"
+source  = "git+https://github.com/stellar/rs-soroban-sdk?rev=a1b2c3d4#a1b2c3d4e5f6..."
+checksum = "abcdef..."
+```
+
+The function extracts:
+- **`RepoURL`** — the bare HTTPS URL, e.g. `https://github.com/stellar/rs-soroban-sdk`
+  (`.git` suffix is stripped; query string is removed).
+- **`CommitHash`** — the 40-char SHA from the `#fragment`, or from `rev=` if
+  no fragment is present, or from the first 40 chars of `checksum` as fallback.
+
+The generated GitHub permalink has the form:
+
+```
+https://github.com/<owner>/<repo>/blob/<commit>/<rel-path-inside-checkout>
+```
+
+---
+
+## External URL generation
+
+| `SourceOrigin` | Generator | Example URL |
+|---|---|---|
+| `OriginLocal` | — | *(none)* |
+| `OriginRegistry` | `docsRSURLForPath` | `https://docs.rs/crate/serde/1.0.203/source/src/lib.rs` |
+| `OriginGit` | `gitHubURLForCargoGit` + `ExtractGitOrigin` | `https://github.com/stellar/rs-soroban-sdk/blob/a1b2c3.../src/lib.rs` |
+| `OriginUnknownSource` | — | *(none)* |
+
+### docs.rs URL format
+
+Registry crate paths follow the Cargo layout:
+
+```
+<CARGO_HOME>/registry/src/<index>/<crate>-<version>/src/...
+```
+
+The generated URL follows docs.rs conventions:
+
+```
+https://docs.rs/crate/<crate>/<version>/source/src/<file>
+```
 
 ---
 
@@ -104,6 +230,8 @@ accidentally hidden or mislabelled.
 
 ```go
 import "github.com/dotandev/glassbox/internal/sourcemap"
+
+// ── OriginClass (JSON schema, stable string values) ───────────────────────
 
 // One-shot classification
 class := sourcemap.ClassifyPath("/project/src/lib.rs", "/project")
@@ -117,14 +245,60 @@ c := sourcemap.NewClassifier(sourcemap.ClassifierOptions{
 class = c.Classify("_generated/tokens.rs")
 // → sourcemap.OriginGenerated
 
-// Display label
+// Display label (for existing OriginClass terminal output)
 fmt.Println(class.Label()) // → "[generated]"
+
+// ── SourceOrigin (in-process enum, link generation) ───────────────────────
+
+// Classify with full context for link generation
+origin := sourcemap.ClassifySourcePath(
+    "/home/user/.cargo/registry/src/index.crates.io-abc/serde-1.0.203/src/lib.rs",
+    "/project",
+    "",  // cargoHome — empty to use CARGO_HOME env or default ~/.cargo
+)
+// → sourcemap.OriginRegistry
+
+// Terminal prefix
+fmt.Println(origin.OriginPrefix()) // → "[crates.io]"
+
+// Generate the external URL (docs.rs or GitHub commit link)
+extURL := sourcemap.ExternalURLForResult(filePath, workspaceRoot, cargoHome, cargoLockPath)
+// → "https://docs.rs/crate/serde/1.0.203/source/src/lib.rs"
+
+// ── Git dependency: extract repo + commit from Cargo.lock ─────────────────
+
+info, err := sourcemap.ExtractGitOrigin(
+    "/home/user/.cargo/git/checkouts/soroban-sdk-abc/def/src/lib.rs",
+    "/project/Cargo.lock",
+)
+// info.RepoURL    → "https://github.com/stellar/rs-soroban-sdk"
+// info.CommitHash → "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+```
+
+### `MappingResolver` with origin classification
+
+`NewMappingResolver` now accepts functional options to supply Cargo context.
+After `Resolve`, `FallbackResult.Origin` and `FallbackResult.ExternalURL` are
+populated automatically:
+
+```go
+resolver := sourcemap.NewMappingResolver(
+    projectRoot,
+    externalRepoRegistry,
+    sourcemap.WithCargoLockPath("/project/Cargo.lock"),
+    sourcemap.WithCargoHome("/home/user/.cargo"),
+)
+result := resolver.Resolve(wasmData, addr)
+
+// result.Origin is one of OriginLocal / OriginRegistry / OriginGit / OriginUnknownSource
+// result.ExternalURL is "" for local files, docs.rs URL for registry, GitHub URL for git
+fmt.Printf("  %s %s\n", result.Origin.OriginPrefix(), result.UserSummary())
+if result.ExternalURL != "" {
+    fmt.Println("  External URL:", result.ExternalURL)
+}
 ```
 
 ### Populating `SourceRef.OriginClass` during source mapping
-
-When the source-mapping pipeline produces a `SourceRef`, it should populate
-`OriginClass` with the result of `Classifier.Classify`:
 
 ```go
 ref := &trace.SourceRef{
@@ -136,9 +310,6 @@ ref := &trace.SourceRef{
 ```
 
 ### Populating `TrapInfo.OriginClass`
-
-`TrapDetector.DetectTrap` should set `OriginClass` after resolving the fault
-location:
 
 ```go
 trap.OriginClass = string(sourcemap.ClassifyPath(trap.SourceLocation.File, projectRoot))
@@ -165,12 +336,19 @@ The extension uses the classification to:
 
 ---
 
-## Related files
+## Implementation files
 
 | File | Purpose |
 |---|---|
-| `internal/sourcemap/origin.go` | `OriginClass` type, `Classifier`, `ClassifyPath` |
-| `internal/sourcemap/origin_test.go` | 22 tests covering all classification rules |
+| `internal/sourcemap/origin.go` | `OriginClass` + `SourceOrigin` types; `Classifier`; `ClassifyPath`; `ClassifySourcePath`; `ExtractGitOrigin`; `ExternalURLForResult`; `docsRSURLForPath`; `gitHubURLForCargoGit` |
+| `internal/sourcemap/origin_test.go` | Tests for `OriginClass` / `Classifier` / `ClassifyPath` |
+| `internal/sourcemap/origin_source_test.go` | Tests for `SourceOrigin`, `ClassifySourcePath`, `ExtractGitOrigin`, URL generation |
+| `internal/sourcemap/fallback.go` | `FallbackResult.Origin` and `FallbackResult.ExternalURL` fields |
+| `internal/sourcemap/mapping_resolver.go` | `attachOrigin()` — populates `Origin` + `ExternalURL` after each `Resolve` call |
+| `internal/trace/sourcemap.go` | Terminal printer — renders `[local]`/`[crates.io]`/`[git]` prefix and `External URL:` line |
+| `internal/sarif/rules.go` | `SecurityWarning.ExternalURL` field |
+| `internal/sarif/families.go` | `physicalLocation()` uses `ExternalURL` as `artifactLocation.uri` when present |
+| `internal/sarif/external_url_test.go` | SARIF ExternalURL propagation tests |
 | `internal/trace/splitpane.go` | `SourceRef.OriginClass` field definition |
 | `internal/trace/formatter.go` | `sourceRefOriginLabel` helper; label in formatter output |
 | `internal/trace/trap.go` | `TrapInfo.OriginClass` field; label in `FormatTrapInfo` |

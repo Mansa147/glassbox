@@ -46,9 +46,6 @@ const (
 	ConfidenceHeuristicCargo = 22
 	// ConfidenceUnknown is the score when no location is resolved.
 	ConfidenceUnknown = 0
-
-	// AutoLinkMinConfidence is the minimum score to auto-generate a source link.
-const AutoLinkMinConfidence = 72
 )
 
 // DetailedConfidence provides structured confidence information for source mappings.

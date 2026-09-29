@@ -82,9 +82,19 @@ type FallbackResult struct {
 	// CandidateLink is set when confidence is below auto-link threshold.
 	CandidateLink string `json:"candidate_link,omitempty"`
 	// LinkProvenance is rendered beside source links so reports identify the replay revision.
+	LinkProvenance string `json:"link_provenance,omitempty"`
 	// DetailedConfidence provides structured confidence information with reason codes.
 	DetailedConfidence *DetailedConfidence `json:"detailed_confidence,omitempty"`
-	LinkProvenance string `json:"link_provenance,omitempty"`
+	// Origin classifies where the resolved source file came from.
+	// Use OriginPrefix() to get the terminal display prefix ([local], [crates.io], [git]).
+	// Populated by MappingResolver.Resolve after source-path classification.
+	Origin SourceOrigin `json:"origin,omitempty"`
+	// ExternalURL is a web-accessible permalink for the source location.
+	// Empty for local workspace files (OriginLocal) and unknown origins.
+	// For registry crates it is a docs.rs URL; for git dependencies it
+	// points to the specific commit in the remote repository.
+	// When non-empty the SARIF writer uses this as the artifactLocation.uri.
+	ExternalURL string `json:"external_url,omitempty"`
 }
 
 // FallbackMapper resolves source locations for WASM binaries that may lack
