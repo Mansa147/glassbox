@@ -87,6 +87,111 @@ glassbox audit:sign \
   --audit-log-kms-region us-east-1
 ```
 
+## Retry & Idempotency Auditability
+
+### Signing attempt records
+
+Every audit record produced by `audit:sign` now includes a `signing_attempts` array that records every KMS API call made during the retry loop. This gives compliance reviewers a complete view of the signing history — including any transient failures — without requiring access to runtime logs.
+
+Each entry contains:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `attempt_number` | int | 1-based sequence number within this signing operation |
+| `started_at` | time.Time (RFC3339) | Wall-clock time at which this specific KMS API call was initiated |
+| `duration_ms` | int64 | Round-trip time of this KMS call in milliseconds |
+| `error_category` | string | Outcome classification (see table below) |
+| `error_message` | string | AWS error string; empty on success |
+| `idempotency_key` | string | `"v1:<key-id>:<hex(sha256(message))>"` — safe to store, contains no message bytes |
+
+**`error_category` values:**
+
+| Value | Meaning |
+|-------|---------|
+| `success` | The KMS API returned a valid signature |
+| `throttled` | AWS KMS responded with a throttling error code |
+| `auth_failure` | Permanent authorization or key-state failure; no retry |
+| `transient` | Retryable infrastructure error (`InternalError`, `ServiceUnavailable`, etc.) |
+| `network` | TCP/TLS failure classified as `net.Error` |
+| `context` | The caller's context was cancelled during a backoff sleep |
+
+A record that succeeded on the first attempt has exactly one entry:
+
+```json
+"signing_attempts": [
+  {
+    "attempt_number": 1,
+    "started_at": "2026-01-15T10:23:45.123Z",
+    "duration_ms": 87,
+    "error_category": "success",
+    "idempotency_key": "v1:alias/GlassboxAuditKey:a3f9..."
+  }
+]
+```
+
+A record that required two retries before succeeding has three entries:
+
+```json
+"signing_attempts": [
+  { "attempt_number": 1, "duration_ms": 210, "error_category": "throttled",
+    "error_message": "ThrottlingException: ...", "idempotency_key": "v1:..." },
+  { "attempt_number": 2, "duration_ms": 198, "error_category": "throttled",
+    "error_message": "ThrottlingException: ...", "idempotency_key": "v1:..." },
+  { "attempt_number": 3, "duration_ms": 91,  "error_category": "success",
+    "idempotency_key": "v1:..." }
+]
+```
+
+An idempotency cache hit produces an empty `signing_attempts` array (no KMS calls were made).
+
+---
+
+## Dead-letter queue
+
+When KMS signing exhausts all retries and fails, the unsigned payload and the full attempt history are written atomically to a **dead-letter file**:
+
+```
+~/.Glassbox/dead-letter/kms/<session-id>-<unix-nano>.json
+```
+
+The dead-letter file has the same shape as a `SignedAuditLog` but with `"status": "unsigned"` instead of `Signature`/`PublicKey`. The `signing_attempts` array records every failed KMS call from the original signing attempt.
+
+### Inspecting dead-letter files
+
+```bash
+ls ~/.Glassbox/dead-letter/kms/
+cat ~/.Glassbox/dead-letter/kms/<file>.json | jq .signing_attempts
+```
+
+### Re-signing with audit:redeliver
+
+Once the KMS issue is resolved, re-sign all pending dead-letter files:
+
+```bash
+# Re-sign using the current provider configuration
+glassbox audit:redeliver
+
+# Dry-run: show what would be re-signed without doing it
+glassbox audit:redeliver --dry-run
+
+# Write re-signed records to a specific directory
+glassbox audit:redeliver --output-dir ./re-signed/
+
+# Use a different dead-letter directory
+glassbox audit:redeliver --dead-letter-dir /mnt/audit/dead-letter/kms
+```
+
+`audit:redeliver` processes files oldest-first. For each file:
+1. Re-signs the stored payload using the currently configured signing provider.
+2. Writes the signed record to `--output-dir` (or stdout if not set).
+3. Removes the dead-letter file on success.
+
+The original `signing_attempts` from the failed attempt are preserved in the re-signed record alongside the new attempt, so auditors can see the complete history.
+
+A failed re-sign leaves the file in the queue. The exit code is non-zero if any file could not be re-signed.
+
+---
+
 ## Retry & Idempotency
 
 `Glassbox` wraps the AWS SDK's Sign call in a bounded retry and idempotency layer (Issue 66) so transient KMS failures do not silently double-bill the service and so callers can reason about what happened.

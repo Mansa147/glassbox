@@ -253,6 +253,15 @@ func (s *KMSSigner) SignWithMetadata(ctx context.Context, message []byte, correl
 				"key_ref", safeKeyIDRef(s.keyID),
 			)
 			if err := waitWithContext(ctx, backoff); err != nil {
+				// Record the context-cancellation as a synthetic attempt entry.
+				meta.SigningAttempts = append(meta.SigningAttempts, SigningAttempt{
+					AttemptNumber: meta.Attempts,
+					StartedAt:     s.now(),
+					DurationMS:    0,
+					ErrorCategory: "context",
+					ErrorMessage:  err.Error(),
+					IdempotencyKey: cacheKey,
+				})
 				meta.ErrorCode = "ContextCancelled"
 				meta.ErrorClass = "context"
 				meta.Elapsed = s.now().Sub(start)
@@ -260,8 +269,20 @@ func (s *KMSSigner) SignWithMetadata(ctx context.Context, message []byte, correl
 			}
 		}
 
+		// Record the start time of this specific KMS API call.
+		attemptStart := s.now()
 		sig, err := s.callSignOnce(ctx, digest)
+		attemptDuration := s.now().Sub(attemptStart)
+
 		if err == nil {
+			// Successful attempt — record it then return.
+			meta.SigningAttempts = append(meta.SigningAttempts, SigningAttempt{
+				AttemptNumber:  meta.Attempts,
+				StartedAt:      attemptStart,
+				DurationMS:     attemptDuration.Milliseconds(),
+				ErrorCategory:  "success",
+				IdempotencyKey: cacheKey,
+			})
 			s.idemCache.put(cacheKey, sig)
 			meta.Signature = sig
 			meta.Elapsed = s.now().Sub(start)
@@ -278,6 +299,16 @@ func (s *KMSSigner) SignWithMetadata(ctx context.Context, message []byte, correl
 		meta.Retryable = retryable
 		meta.ErrorCode = code
 		meta.ErrorClass = class
+
+		// Record this failed attempt.
+		meta.SigningAttempts = append(meta.SigningAttempts, SigningAttempt{
+			AttemptNumber:  meta.Attempts,
+			StartedAt:      attemptStart,
+			DurationMS:     attemptDuration.Milliseconds(),
+			ErrorCategory:  errorCategoryForAttempt(err, code, class),
+			ErrorMessage:   err.Error(),
+			IdempotencyKey: cacheKey,
+		})
 
 		s.logFn(logDebug, "kms sign attempt failed",
 			"correlation_id", correlationID,
@@ -639,4 +670,12 @@ var kmsThrottlingCodes = map[string]struct{}{
 func isKMSThrottlingCode(code string) bool {
 	_, ok := kmsThrottlingCodes[code]
 	return ok
+}
+
+// IdempotencyKeyFor returns the idempotency cache key that would be used
+// for the given pre-hashed message.  Exposed so the dead-letter writer in
+// cmd/audit_sign.go can embed the key in dead-letter entries without
+// duplicating the key derivation logic.
+func (s *KMSSigner) IdempotencyKeyFor(hash []byte) string {
+	return idempotencyKey(s.keyID, hash)
 }

@@ -91,15 +91,20 @@ type SignatureProvenance struct {
 
 // SignedAuditLog is the JSON output produced by audit:sign.
 type SignedAuditLog struct {
-	Version    string               `json:"version"`
-	Timestamp  time.Time            `json:"timestamp"`
-	TraceHash  string               `json:"trace_hash"`
-	Signature  string               `json:"signature"`
-	PublicKey  string               `json:"public_key"`
-	Provider   string               `json:"provider"`
+	Version    string                    `json:"version"`
+	Timestamp  time.Time                 `json:"timestamp"`
+	TraceHash  string                    `json:"trace_hash"`
+	Signature  string                    `json:"signature"`
+	PublicKey  string                    `json:"public_key"`
+	Provider   string                    `json:"provider"`
 	KeyOrigin  *signer.KeyOriginMetadata `json:"key_origin,omitempty"`
-	Provenance *SignatureProvenance `json:"provenance,omitempty"`
-	Payload    json.RawMessage      `json:"payload"`
+	Provenance *SignatureProvenance       `json:"provenance,omitempty"`
+	Payload    json.RawMessage           `json:"payload"`
+	// SigningAttempts records every KMS API call made during the retry loop.
+	// Present only when the KMS provider was used. Empty for idempotency hits
+	// and for non-KMS providers.  Included in the canonical hash so that
+	// post-signing tampering with attempt records invalidates the signature.
+	SigningAttempts []signer.SigningAttempt `json:"signing_attempts,omitempty"`
 }
 
 var auditSignCmd = &cobra.Command{
@@ -335,9 +340,59 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 	}
 
 	hash := sha256.Sum256(hashInputBytes)
-	signature, err := signerImpl.Sign(hash[:])
-	if err != nil {
-		return errors.WrapValidationError(fmt.Sprintf("signing failed: %v", err))
+	// ── Signing ───────────────────────────────────────────────────────────────
+	// When the signer is a KMSSigner, use SignWithMetadata so per-attempt audit
+	// records are captured and included in the canonical hash.  For all other
+	// providers the existing Sign() path is used unchanged.
+	var signature []byte
+	var signingAttempts []signer.SigningAttempt
+
+	if kmsSgn, ok := signerImpl.(*signer.KMSSigner); ok {
+		// Use the correlation ID from the key-id flag when available so the
+		// signing session can be traced across KMS CloudTrail and Glassbox logs.
+		corrID := auditSignKeyID
+		kmsMeta, kmsErr := kmsSgn.SignWithMetadata(cmd.Context(), hash[:], corrID)
+		signingAttempts = kmsMeta.SigningAttempts
+
+		if kmsErr != nil {
+			// Write the unsigned payload and attempt history to the dead-letter
+			// queue so operators can re-sign after the KMS issue is resolved.
+			dlw := signer.NewDeadLetterWriter()
+			dlEntry := signer.DeadLetterEntry{
+				SessionID:      corrID,
+				IdempotencyKey: kmsSgn.IdempotencyKeyFor(hash[:]),
+				Provider:       providerName,
+				ErrorCode:      kmsMeta.ErrorCode,
+				ErrorClass:     kmsMeta.ErrorClass,
+				SigningAttempts: signingAttempts,
+				Payload:        json.RawMessage(payloadBytes),
+			}
+			if writeErr := dlw.Write(dlEntry); writeErr != nil {
+				// Writing to the dead-letter queue failed — surface both errors
+				// so the operator knows the payload was lost.
+				return errors.WrapValidationError(fmt.Sprintf(
+					"signing failed: %v\n"+
+						"  Additionally, failed to write dead-letter entry: %v\n"+
+						"  The unsigned payload has NOT been preserved.",
+					kmsErr, writeErr,
+				))
+			}
+			dlDir, _ := signer.DefaultDeadLetterDir()
+			return errors.WrapValidationError(fmt.Sprintf(
+				"signing failed after %d attempt(s): %v\n"+
+					"  The unsigned payload has been written to the dead-letter queue at:\n"+
+					"    %s\n"+
+					"  Run 'glassbox audit:redeliver' to re-sign it once the KMS issue is resolved.",
+				kmsMeta.Attempts, kmsErr, dlDir,
+			))
+		}
+		signature = kmsMeta.Signature
+	} else {
+		var signErr error
+		signature, signErr = signerImpl.Sign(hash[:])
+		if signErr != nil {
+			return errors.WrapValidationError(fmt.Sprintf("signing failed: %v", signErr))
+		}
 	}
 
 	publicKey, err := signerImpl.PublicKey()
@@ -346,14 +401,15 @@ func runAuditSign(cmd *cobra.Command, args []string) error {
 	}
 
 	auditLog := SignedAuditLog{
-		Version:   "1.0.0",
-		Timestamp: time.Now().UTC(),
-		TraceHash: hex.EncodeToString(hash[:]),
-		Signature: hex.EncodeToString(signature),
-		PublicKey: hex.EncodeToString(publicKey),
-		Provider:  providerName,
-		KeyOrigin: &keyOrigin,
-		Payload:   json.RawMessage(payloadBytes),
+		Version:         "1.0.0",
+		Timestamp:       time.Now().UTC(),
+		TraceHash:       hex.EncodeToString(hash[:]),
+		Signature:       hex.EncodeToString(signature),
+		PublicKey:       hex.EncodeToString(publicKey),
+		Provider:        providerName,
+		KeyOrigin:       &keyOrigin,
+		Payload:         json.RawMessage(payloadBytes),
+		SigningAttempts:  signingAttempts,
 	}
 
 	// Attach provenance metadata when any provenance flag is set.

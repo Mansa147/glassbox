@@ -103,6 +103,50 @@ type KMSSignMetadata struct {
 	// Elapsed is the wall-clock duration of the whole call (cache lookup
 	// + retry loop). Useful for latency budgets and tests.
 	Elapsed time.Duration
+
+	// SigningAttempts holds per-attempt detail for every KMS API call
+	// made during the retry loop.  It is included in the canonical
+	// audit record JSON so reviewers can determine whether a signing
+	// event was straightforward or required multiple attempts.
+	// An idempotency cache hit produces no entries (no KMS calls were made).
+	SigningAttempts []SigningAttempt
+}
+
+// SigningAttempt records the observable outcome of a single KMS Sign
+// API call within the retry loop.  All entries — including the final
+// successful one — appear in the array, allowing a compliance reviewer
+// to reconstruct the full signing history without access to runtime logs.
+//
+// The error_category field uses a closed vocabulary:
+//
+//	"throttled"    — AWS KMS responded with a throttling error code.
+//	"auth_failure" — permanent authorization or key-state failure; no retry.
+//	"transient"    — retryable infrastructure error (InternalError, etc.).
+//	"network"      — TCP/TLS failure classified as net.Error.
+//	"success"      — the KMS API returned a valid signature.
+//	"context"      — the caller's context was cancelled during a backoff.
+//
+// The idempotency_key field is the SHA-256-derived cache key used for this
+// signing operation (never the raw message bytes or digest).
+type SigningAttempt struct {
+	// AttemptNumber is 1-based (first attempt = 1).
+	AttemptNumber int `json:"attempt_number"`
+	// StartedAt is the wall-clock time at which this specific KMS API
+	// call was initiated (after any preceding backoff sleep).
+	StartedAt time.Time `json:"started_at"`
+	// DurationMS is how long the KMS API call itself took, in milliseconds.
+	// For a successful attempt this is the round-trip to KMS. For a failed
+	// attempt it includes the time spent waiting for the error response.
+	DurationMS int64 `json:"duration_ms"`
+	// ErrorCategory classifies the outcome. "success" for the winning call.
+	ErrorCategory string `json:"error_category"`
+	// ErrorMessage is the human-readable error string. Empty on success.
+	ErrorMessage string `json:"error_message,omitempty"`
+	// IdempotencyKey is the opaque cache key for this signing operation.
+	// It is derived as "v1:<key-id>:<hex(sha256(message))>" and is safe
+	// to include in audit records (it contains neither message bytes nor
+	// the digest passed to KMS).
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // ErrEmptyMessage is returned by SignWithMetadata when the caller passes
@@ -281,4 +325,26 @@ func defaultKMSLog() logKMSSign {
 		// indirection. logger.Logger is *slog.Logger; we adapt here.
 		logKMSSignToLogger(level, msg, attrs...)
 	}
+}
+
+// errorCategoryForAttempt maps the outcome of a single retry attempt to the
+// closed error_category vocabulary used in SigningAttempt.
+// A nil error always maps to "success".
+func errorCategoryForAttempt(err error, errorCode, errorClass string) string {
+	if err == nil {
+		return "success"
+	}
+	if errorClass == "context" {
+		return "context"
+	}
+	if errorClass == "network" {
+		return "network"
+	}
+	if isKMSUnauthorizedCode(errorCode) {
+		return "auth_failure"
+	}
+	if isKMSThrottlingCode(errorCode) {
+		return "throttled"
+	}
+	return "transient"
 }
