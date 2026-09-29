@@ -523,6 +523,58 @@ func WrapSessionLockHeld(sessionID string, holderPID int) error {
 	}
 }
 
+// WrapSessionLockHeldWithMetadata returns a structured error when the advisory
+// lock for a session is held and the full lock metadata is available (Issue #813).
+// The hint embeds the holder PID, hostname, acquisition time, and Glassbox
+// version so the developer knows exactly who holds the lock and when it was
+// acquired.
+//
+// Pass empty strings / zero values for any fields that are unavailable; the
+// hint text degrades gracefully.
+func WrapSessionLockHeldWithMetadata(
+	sessionID string,
+	holderPID int,
+	hostname string,
+	acquiredAt string, // formatted RFC3339 string
+	glassboxVersion string,
+) error {
+	msg := fmt.Sprintf(
+		"session %q advisory lock is held by process %d",
+		sessionID, holderPID,
+	)
+
+	var hint string
+	if hostname != "" && acquiredAt != "" && glassboxVersion != "" {
+		hint = fmt.Sprintf(
+			"Session %q is locked by PID %d on host %q (acquired %s, Glassbox %s). "+
+				"Wait for that process to finish and retry. "+
+				"If it has crashed, run 'glassbox session recover' to remove the stale lock, "+
+				"or wait — the lock is cleared automatically once the process exits.",
+			sessionID, holderPID, hostname, acquiredAt, glassboxVersion,
+		)
+	} else if hostname != "" && acquiredAt != "" {
+		hint = fmt.Sprintf(
+			"Session %q is locked by PID %d on host %q (acquired %s). "+
+				"Wait for that process to finish and retry. "+
+				"If it has crashed, run 'glassbox session recover' to remove the stale lock.",
+			sessionID, holderPID, hostname, acquiredAt,
+		)
+	} else {
+		hint = fmt.Sprintf(
+			"Session %q is locked by PID %d. "+
+				"Wait for that process to finish and retry. "+
+				"If it has crashed, run 'glassbox session recover' to remove the stale lock.",
+			sessionID, holderPID,
+		)
+	}
+
+	return &ErstError{
+		Code:    ErstSessionLockHeld,
+		Message: msg,
+		Hint:    hint,
+	}
+}
+
 // LedgerSequenceMismatchError is returned when a transaction's referenced
 // ledger sequence does not match the sequence in the current replay state.
 type LedgerSequenceMismatchError struct {

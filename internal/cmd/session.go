@@ -275,10 +275,20 @@ Validation:
 					))
 			}
 			if stderrors.Is(saveErr, session.ErrLockHeld) {
+				var lhe *session.LockHeldError
+				if stderrors.As(saveErr, &lhe) && lhe.Metadata != nil {
+					return errors.WrapSessionLockHeldWithMetadata(
+						data.ID,
+						lhe.HolderPID,
+						lhe.Metadata.Hostname,
+						lhe.Metadata.AcquiredAt.Format(time.RFC3339),
+						lhe.Metadata.GlassboxVersion,
+					)
+				}
 				return errors.WrapSessionLockHeld(data.ID, 0).(*errors.ErstError).
 					WithHint("Another Glassbox instance is saving this session. " +
 						"Wait a moment and retry. If the other process has crashed, " +
-						"the lock clears automatically after 5 minutes.")
+						"run 'glassbox session recover' to remove the stale lock.")
 			}
 			return errors.WrapValidationError(fmt.Sprintf("failed to save session: %v", saveErr))
 		}
@@ -728,6 +738,19 @@ Validation:
 		data.LastAccessAt = time.Now()
 		_ = session.RecordProvenance(data, session.ProvenanceRecovered, session.ActorSystem,
 			version.Version, data.EnvFingerprint, "recovered from crash checkpoint", true)
+
+		// Before saving, attempt to clear any stale advisory lock left by the
+		// crashed process.  RecoverStaleLock checks the holder's PID liveness
+		// directly and removes the lock+metadata files if the process is gone.
+		lockPath, lpErr := session.LockPathForSession(data.ID)
+		if lpErr == nil {
+			if cleared, recErr := session.RecoverStaleLock(lockPath); recErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not check advisory lock for session %s: %v\n", data.ID, recErr)
+			} else if cleared {
+				fmt.Printf("Stale advisory lock removed for session %s.\n", data.ID)
+			}
+		}
+
 		if saveErr := store.SaveWithValidation(ctx, data); saveErr != nil {
 			return errors.WrapValidationError(fmt.Sprintf(
 				"failed to update recovered session: %v", saveErr))
@@ -847,6 +870,87 @@ session files [Issue #1115].`,
 	},
 }
 
+// sessionLockStatusCmd implements `glassbox session lock:status <session-id>`.
+// It prints the advisory lock metadata for a session without acquiring the
+// lock, so operators can inspect who holds it without disturbing active writers.
+var sessionLockStatusCmd = &cobra.Command{
+	Use:   "lock:status <session-id>",
+	Short: "Print the advisory lock status for a session",
+	Long: `Print the advisory lock metadata for a session without acquiring the lock.
+
+If the session is currently locked, the holder's PID, hostname, acquisition
+time, and Glassbox version are displayed so you can identify who holds it.
+
+If no lock file exists the session reports as "not locked".
+
+This command never attempts to acquire the lock and never modifies any files,
+so it is safe to run at any time.`,
+	Example: `  # Check whether a session is locked
+  glassbox session lock:status abc123
+
+  # Inspect a session lock before recovering
+  glassbox session lock:status <session-id>
+  glassbox session recover`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sessionID := strings.TrimSpace(args[0])
+		if sessionID == "" {
+			return errors.WrapValidationError(
+				"session ID is required\n" +
+					"Usage: glassbox session lock:status <session-id>",
+			)
+		}
+
+		lockPath, err := session.LockPathForSession(sessionID)
+		if err != nil {
+			return errors.WrapValidationError(fmt.Sprintf(
+				"cannot determine lock path for session %q: %v", sessionID, err))
+		}
+
+		// Read the metadata companion file — this is the richer source.
+		meta, metaErr := session.ReadLockMetadata(lockPath)
+		if metaErr != nil {
+			// Metadata file is unreadable.  Fall back to the raw lock record.
+			rec, recErr := session.ReadLockRecord(lockPath)
+			if recErr != nil {
+				if os.IsNotExist(recErr) {
+					fmt.Fprintf(cmd.OutOrStdout(), "Session %q: not locked\n", sessionID)
+					return nil
+				}
+				return errors.WrapValidationError(fmt.Sprintf(
+					"cannot read lock file for session %q: %v", sessionID, recErr))
+			}
+			// Partial display from raw record.
+			fmt.Fprintf(cmd.OutOrStdout(), "Session %q: LOCKED\n", sessionID)
+			fmt.Fprintf(cmd.OutOrStdout(), "  PID         : %d\n", rec.PID)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Acquired at : %s\n", rec.AcquiredAt.Format(time.RFC3339))
+			fmt.Fprintf(cmd.OutOrStdout(), "  (metadata file unreadable: %v)\n", metaErr)
+			return nil
+		}
+
+		if meta == nil {
+			// No metadata file and no lock file present.
+			// Double-check the raw lock file.
+			_, recErr := session.ReadLockRecord(lockPath)
+			if recErr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Session %q: not locked\n", sessionID)
+				return nil
+			}
+			// Lock file exists but metadata is missing.
+			fmt.Fprintf(cmd.OutOrStdout(), "Session %q: LOCKED (metadata unavailable)\n", sessionID)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Hint: run 'glassbox session recover' to check for a stale lock.\n")
+			return nil
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Session %q: LOCKED\n", sessionID)
+		fmt.Fprintf(cmd.OutOrStdout(), "  PID             : %d\n", meta.PID)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Hostname        : %s\n", meta.Hostname)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Acquired at     : %s\n", meta.AcquiredAt.Format(time.RFC3339))
+		fmt.Fprintf(cmd.OutOrStdout(), "  Glassbox version: %s\n", meta.GlassboxVersion)
+		return nil
+	},
+}
+
 func init() {
 	sessionSaveCmd.Flags().StringVar(&sessionIDFlag, "id", "", "Custom session ID (default: auto-generated)")
 	sessionSaveCmd.Flags().StringVar(&sessionNameFlag, "name", "", "Bookmark name for this session snapshot")
@@ -877,6 +981,7 @@ func init() {
 	sessionCmd.AddCommand(sessionRecoverCmd)
 	sessionCmd.AddCommand(sessionDoctorCmd)
 	sessionCmd.AddCommand(sessionMigrateCmd)
+	sessionCmd.AddCommand(sessionLockStatusCmd)
 
 	rootCmd.AddCommand(sessionCmd)
 }
